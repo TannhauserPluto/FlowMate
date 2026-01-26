@@ -1,145 +1,165 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 
 interface Task {
   id: string;
   content: string;
   completed: boolean;
-  subtasks?: Task[];
 }
 
-interface AIResponse {
-  action: 'speak' | 'animate' | 'task' | 'break';
+interface ChatMessage {
+  role: 'user' | 'assistant';
   content: string;
-  audioUrl?: string;
+  emotion?: string;
+}
+
+interface ChatHistory {
+  user?: string;
+  assistant?: string;
 }
 
 const API_BASE = 'http://127.0.0.1:8000/api';
 
 /**
  * AI 交互钩子
- * 与 Python 后端通信，获取 AI 响应
+ * 与 Python 后端 Brain API 通信
  */
 export function useFlowAI() {
   const [isLoading, setIsLoading] = useState(false);
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   /**
-   * 生成任务拆解
+   * 任务拆解 - 调用 /api/brain/decompose
+   * 将大任务拆解为 3 个可执行步骤
    */
-  const generateTasks = useCallback(async (input: string): Promise<Task[]> => {
+  const decomposeTasks = useCallback(async (task: string): Promise<Task[]> => {
     setIsLoading(true);
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE}/interaction/generate-tasks`, {
+      const response = await fetch(`${API_BASE}/brain/decompose`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_description: input }),
+        body: JSON.stringify({ task }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to generate tasks');
+        throw new Error('任务拆解失败');
       }
 
-      const data = await response.json();
-      return data.tasks.map((task: string, index: number) => ({
+      const steps: string[] = await response.json();
+      return steps.map((step, index) => ({
         id: `task-${Date.now()}-${index}`,
-        content: task,
+        content: step,
         completed: false,
       }));
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      setError(message);
-      return [];
+      const msg = err instanceof Error ? err.message : '未知错误';
+      setError(msg);
+      // 返回默认任务
+      return [
+        { id: `task-${Date.now()}-0`, content: '打开相关软件', completed: false },
+        { id: `task-${Date.now()}-1`, content: '新建工作文件', completed: false },
+        { id: `task-${Date.now()}-2`, content: '写下第一行内容', completed: false },
+      ];
     } finally {
       setIsLoading(false);
     }
   }, []);
 
   /**
-   * 获取 AI 响应 (闲聊/鼓励/提醒)
+   * 闲聊 - 调用 /api/brain/chat
+   * FlowMate 伴侣对话
    */
-  const getAIResponse = useCallback(async (context: {
-    flowState: string;
-    workDuration: number;
-    fatigueLevel: number;
-  }): Promise<AIResponse | null> => {
-    try {
-      const response = await fetch(`${API_BASE}/interaction/get-response`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(context),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to get AI response');
-      }
-
-      return await response.json();
-    } catch (err) {
-      console.error('AI response error:', err);
-      return null;
-    }
-  }, []);
-
-  /**
-   * 语音合成
-   */
-  const synthesizeSpeech = useCallback(async (text: string): Promise<string | null> => {
-    try {
-      const response = await fetch(`${API_BASE}/interaction/synthesize-speech`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to synthesize speech');
-      }
-
-      const data = await response.json();
-      return data.audio_url;
-    } catch (err) {
-      console.error('Speech synthesis error:', err);
-      return null;
-    }
-  }, []);
-
-  /**
-   * 发送用户消息
-   */
-  const sendMessage = useCallback(async (message: string): Promise<string | null> => {
-    setIsLoading(true);
+  const chat = useCallback(async (message: string): Promise<{ reply: string; emotion: string }> => {
+    setIsChatLoading(true);
     setError(null);
 
+    // 添加用户消息到界面
+    const userMessage: ChatMessage = { role: 'user', content: message };
+    setMessages(prev => [...prev, userMessage]);
+
     try {
-      const response = await fetch(`${API_BASE}/interaction/chat`, {
+      const response = await fetch(`${API_BASE}/brain/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ 
+          message,
+          history: chatHistory.slice(-6), // 最近 6 轮对话
+        }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to send message');
+        throw new Error('聊天请求失败');
       }
 
-      const data = await response.json();
-      return data.reply;
+      const data: { reply: string; emotion: string } = await response.json();
+
+      // 添加助手回复到界面
+      const assistantMessage: ChatMessage = { 
+        role: 'assistant', 
+        content: data.reply,
+        emotion: data.emotion,
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+
+      // 更新历史记录
+      setChatHistory(prev => [...prev, { user: message, assistant: data.reply }]);
+
+      return data;
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      setError(message);
-      return null;
+      const fallbackReply = '我在这里陪着你，有什么需要帮忙的吗';
+      const assistantMessage: ChatMessage = { 
+        role: 'assistant', 
+        content: fallbackReply,
+        emotion: 'neutral',
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      
+      return { reply: fallbackReply, emotion: 'neutral' };
     } finally {
-      setIsLoading(false);
+      setIsChatLoading(false);
     }
+  }, [chatHistory]);
+
+  /**
+   * 清空聊天记录
+   */
+  const clearChat = useCallback(() => {
+    setMessages([]);
+    setChatHistory([]);
   }, []);
 
+  /**
+   * 兼容旧接口 - generateTasks
+   */
+  const generateTasks = decomposeTasks;
+
+  /**
+   * 兼容旧接口 - sendMessage
+   */
+  const sendMessage = useCallback(async (message: string): Promise<string | null> => {
+    const result = await chat(message);
+    return result.reply;
+  }, [chat]);
+
   return {
+    // 状态
     isLoading,
+    isChatLoading,
     error,
-    generateTasks,
-    getAIResponse,
-    synthesizeSpeech,
-    sendMessage,
+    messages,
+    chatHistory,
+    
+    // 任务拆解
+    decomposeTasks,
+    generateTasks, // 兼容旧接口
+    
+    // 闲聊
+    chat,
+    sendMessage, // 兼容旧接口
+    clearChat,
   };
 }

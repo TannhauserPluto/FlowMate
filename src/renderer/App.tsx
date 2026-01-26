@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import VideoAvatar from './components/VideoAvatar';
 import TaskPanel from './components/TaskPanel';
+import ChatPanel from './components/ChatPanel';
 import FlowTimer from './components/FlowTimer';
 import { usePerception } from './hooks/usePerception';
 import { useFlowAI } from './hooks/useFlowAI';
@@ -11,13 +12,16 @@ type AvatarState = 'idle' | 'work' | 'focus' | 'shhh' | 'stretch';
 // 心流状态类型
 type FlowState = 'idle' | 'working' | 'flow' | 'immunity' | 'break';
 
+// 面板类型
+type PanelType = 'none' | 'task' | 'chat';
+
 // 发呆检测阈值 (毫秒)
 const IDLE_DETECTION_THRESHOLD = 5000;
 
 const App: React.FC = () => {
   const [avatarState, setAvatarState] = useState<AvatarState>('idle');
   const [flowState, setFlowState] = useState<FlowState>('idle');
-  const [showTaskPanel, setShowTaskPanel] = useState(false);
+  const [activePanel, setActivePanel] = useState<PanelType>('none');
   const [wpm, setWpm] = useState(0);
   const [charsPerMinute, setCharsPerMinute] = useState(0);
   const [showIdlePrompt, setShowIdlePrompt] = useState(false);
@@ -33,7 +37,14 @@ const App: React.FC = () => {
   } = usePerception();
 
   // AI 钩子
-  const { generateTasks, isLoading } = useFlowAI();
+  const { 
+    decomposeTasks,
+    chat,
+    clearChat,
+    isLoading, 
+    isChatLoading,
+    messages,
+  } = useFlowAI();
 
   // 监听键盘活动数据
   useEffect(() => {
@@ -57,9 +68,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (flowState === 'working' && mouseIdleTime > IDLE_DETECTION_THRESHOLD && !isKeyboardActive) {
       setShowIdlePrompt(true);
-      setAvatarState('focus'); // 抬头看镜头
-      
-      // 5 秒后自动隐藏提示
+      setAvatarState('focus');
       setTimeout(() => setShowIdlePrompt(false), 5000);
     }
   }, [mouseIdleTime, isKeyboardActive, flowState]);
@@ -141,7 +150,6 @@ const App: React.FC = () => {
   const triggerShhh = useCallback(() => {
     setAvatarState('shhh');
     
-    // 3 秒后切回工作状态
     if (shhhTimeoutRef.current) {
       clearTimeout(shhhTimeoutRef.current);
     }
@@ -149,6 +157,17 @@ const App: React.FC = () => {
       setAvatarState('work');
     }, 3000);
   }, []);
+
+  // 任务全部完成时的回调
+  const handleAllTasksCompleted = useCallback(async () => {
+    // 自动发送完成消息给 FlowMate
+    await chat('我做完了！');
+  }, [chat]);
+
+  // 切换面板
+  const togglePanel = (panel: PanelType) => {
+    setActivePanel(prev => prev === panel ? 'none' : panel);
+  };
 
   // 窗口控制
   const handleMinimize = () => {
@@ -163,7 +182,7 @@ const App: React.FC = () => {
     <div className="app-container">
       {/* 标题栏 */}
       <div className="title-bar">
-        <span className="title">FlowMate-Echo</span>
+        <span className="title">FlowMate</span>
         <div className="window-controls">
           <button className="minimize-btn" onClick={handleMinimize}>-</button>
           <button className="close-btn" onClick={handleClose}>×</button>
@@ -192,19 +211,38 @@ const App: React.FC = () => {
         onShhhTrigger={triggerShhh}
       />
 
-      {/* 任务面板切换按钮 */}
-      <button
-        className="task-toggle-btn"
-        onClick={() => setShowTaskPanel(!showTaskPanel)}
-      >
-        {showTaskPanel ? '收起任务' : '展开任务'}
-      </button>
+      {/* 面板切换按钮 */}
+      <div className="panel-toggle-btns">
+        <button
+          className={`panel-btn ${activePanel === 'task' ? 'active' : ''}`}
+          onClick={() => togglePanel('task')}
+        >
+          任务拆解
+        </button>
+        <button
+          className={`panel-btn ${activePanel === 'chat' ? 'active' : ''}`}
+          onClick={() => togglePanel('chat')}
+        >
+          聊天
+        </button>
+      </div>
 
       {/* 任务面板 */}
-      {showTaskPanel && (
+      {activePanel === 'task' && (
         <TaskPanel
-          onGenerateTasks={generateTasks}
+          onGenerateTasks={decomposeTasks}
           isLoading={isLoading}
+          onAllTasksCompleted={handleAllTasksCompleted}
+        />
+      )}
+
+      {/* 聊天面板 */}
+      {activePanel === 'chat' && (
+        <ChatPanel
+          messages={messages}
+          onSendMessage={chat}
+          isLoading={isChatLoading}
+          onClearChat={clearChat}
         />
       )}
 
@@ -222,15 +260,6 @@ const App: React.FC = () => {
           <span className="wpm-display">{charsPerMinute} 字符/分</span>
         )}
       </div>
-
-      {/* 演示快捷键提示 (开发模式) */}
-      {process.env.NODE_ENV === 'development' && (
-        <div className="demo-shortcuts-hint">
-          <small>
-            演示快捷键: Ctrl+Shift+1 (跳到结束) | Ctrl+Shift+2 (模拟打字) | Ctrl+Shift+3 (触发发呆) | Ctrl+Shift+4 (触发嘘)
-          </small>
-        </div>
-      )}
     </div>
   );
 };

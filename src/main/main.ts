@@ -7,7 +7,8 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let pythonProcess: ChildProcess | null = null;
 
-const isDev = process.env.NODE_ENV === 'development';
+// 开发模式检测：检查是否有 Vite 服务运行或通过环境变量判断
+const isDev = !app.isPackaged;
 
 /**
  * 创建主窗口
