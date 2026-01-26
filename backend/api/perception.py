@@ -3,15 +3,65 @@ FlowMate-Echo Perception API
 感知相关的 API 路由
 """
 
+import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
 from services import vision_service, fatigue_detector
+from services.modelscope_vision import presence_detector
 from core import flow_manager
 
 router = APIRouter()
 
+
+# ==================== 在位检测 ====================
+
+class PresenceRequest(BaseModel):
+    """在位检测请求"""
+    image: str  # Base64 编码的图片
+
+
+class PresenceResponse(BaseModel):
+    """在位检测响应"""
+    presence: bool
+    confidence: float
+    landmarks_count: int
+    debug_info: str
+    latency_ms: int
+
+
+@router.post("/analyze/presence", response_model=PresenceResponse)
+async def analyze_presence(request: PresenceRequest):
+    """
+    用户在位检测接口
+    
+    使用 OpenCV Haar Cascade 检测画面中是否有人
+    
+    - **输入**: {"image": "base64编码的图片"}
+    - **输出**: {"presence": true/false, "confidence": 0.85, ...}
+    """
+    if not request.image:
+        raise HTTPException(status_code=400, detail="图片数据不能为空")
+    
+    start_time = time.time()
+    
+    try:
+        result = presence_detector.detect_presence_from_base64(request.image)
+        latency_ms = int((time.time() - start_time) * 1000)
+        
+        return PresenceResponse(
+            presence=result["presence"],
+            confidence=result["confidence"],
+            landmarks_count=result["landmarks_count"],
+            debug_info=result["debug_info"],
+            latency_ms=latency_ms,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"检测失败: {str(e)}")
+
+
+# ==================== 屏幕分析 ====================
 
 class ScreenAnalysisRequest(BaseModel):
     """屏幕分析请求"""

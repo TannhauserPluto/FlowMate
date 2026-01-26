@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FlowMate - MediaPipe 在位检测测试</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 24px;
+            color: #a0a0ff;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 20px;
+        }
+
+        .video-section {
+            background: rgba(30, 30, 50, 0.9);
+            border-radius: 16px;
+            padding: 20px;
+            position: relative;
+        }
+
+        #video {
+            width: 100%;
+            border-radius: 12px;
+            background: #000;
+            transform: scaleX(-1);
+        }
+
+        #canvas {
+            display: none;
+        }
+
+        .status-section {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .status-card {
+            background: rgba(30, 30, 50, 0.9);
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+        }
+
+        .presence-indicator {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            margin: 0 auto 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 48px;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.3);
+        }
+
+        .presence-indicator.detecting {
+            background: linear-gradient(135deg, #3a3a5a, #2a2a4a);
+            animation: pulse 1.5s infinite;
+        }
+
+        .presence-indicator.present {
+            background: linear-gradient(135deg, #10b981, #059669);
+            box-shadow: 0 0 40px rgba(16, 185, 129, 0.5);
+        }
+
+        .presence-indicator.absent {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            box-shadow: 0 0 40px rgba(239, 68, 68, 0.5);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(0.95); }
+        }
+
+        .status-text {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .status-text.present { color: #10b981; }
+        .status-text.absent { color: #ef4444; }
+        .status-text.detecting { color: #a0a0a0; }
+
+        .stats-card {
+            background: rgba(30, 30, 50, 0.9);
+            border-radius: 16px;
+            padding: 20px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: #a0a0a0;
+            font-size: 14px;
+        }
+
+        .stat-value {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .stat-value.good { color: #10b981; }
+        .stat-value.warning { color: #f59e0b; }
+        .stat-value.bad { color: #ef4444; }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-top: 16px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #6366f1;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #4f46e5;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #a0a0a0;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .log-section {
+            margin-top: 20px;
+            background: rgba(30, 30, 50, 0.9);
+            border-radius: 16px;
+            padding: 20px;
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .log-header h3 {
+            font-size: 16px;
+            color: #a0a0ff;
+        }
+
+        .log-content {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        .log-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .log-time {
+            color: #6366f1;
+            margin-right: 8px;
+        }
+
+        .log-present { color: #10b981; }
+        .log-absent { color: #ef4444; }
+        .log-error { color: #f59e0b; }
+
+        .error-banner {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.5);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-banner.show {
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>FlowMate - MediaPipe Pose 在位检测测试</h1>
+
+        <div class="error-banner" id="errorBanner">
+            <strong>错误:</strong> <span id="errorMessage"></span>
+        </div>
+
+        <div class="main-content">
+            <div class="video-section">
+                <video id="video" autoplay playsinline></video>
+                <canvas id="canvas"></canvas>
+                
+                <div class="controls">
+                    <button class="btn btn-primary" id="startBtn" onclick="startDetection()">
+                        开始检测
+                    </button>
+                    <button class="btn btn-secondary" id="stopBtn" onclick="stopDetection()" disabled>
+                        停止检测
+                    </button>
+                </div>
+            </div>
+
+            <div class="status-section">
+                <div class="status-card">
+                    <div class="presence-indicator detecting" id="indicator">
+                        ?
+                    </div>
+                    <div class="status-text detecting" id="statusText">等待启动</div>
+                    <div class="debug-info" id="debugInfo" style="font-size: 12px; color: #a0a0a0;">
+                        点击"开始检测"启动摄像头
+                    </div>
+                </div>
+
+                <div class="stats-card">
+                    <div class="stat-row">
+                        <span class="stat-label">检测延迟</span>
+                        <span class="stat-value" id="latency">-- ms</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">置信度</span>
+                        <span class="stat-value" id="confidence">--%</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">骨骼点数</span>
+                        <span class="stat-value" id="landmarks">--</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">检测次数</span>
+                        <span class="stat-value" id="detectCount">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">成功率</span>
+                        <span class="stat-value" id="successRate">--%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="log-section">
+            <div class="log-header">
+                <h3>检测日志</h3>
+                <button class="btn btn-secondary" onclick="clearLog()" style="padding: 6px 12px; font-size: 12px;">
+                    清空
+                </button>
+            </div>
+            <div class="log-content" id="logContent">
+                <div class="log-entry">
+                    <span class="log-time">[系统]</span>
+                    <span>页面已加载，等待启动检测...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://127.0.0.1:8000/api/perception/analyze/presence';
+        const DETECTION_INTERVAL = 1000;
+
+        let video = null;
+        let canvas = null;
+        let ctx = null;
+        let stream = null;
+        let detectionTimer = null;
+        let detectCount = 0;
+        let successCount = 0;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+        });
+
+        async function startDetection() {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: 'user'
+                    }
+                });
+
+                video.srcObject = stream;
+                await video.play();
+
+                canvas.width = video.videoWidth || 640;
+                canvas.height = video.videoHeight || 480;
+
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+                updateStatus('detecting', '检测中...', '正在分析画面');
+
+                addLog('摄像头已启动', 'info');
+
+                detectionTimer = setInterval(captureAndDetect, DETECTION_INTERVAL);
+                captureAndDetect();
+
+                hideError();
+            } catch (err) {
+                showError('无法访问摄像头: ' + err.message);
+                addLog('摄像头访问失败: ' + err.message, 'error');
+            }
+        }
+
+        function stopDetection() {
+            if (detectionTimer) {
+                clearInterval(detectionTimer);
+                detectionTimer = null;
+            }
+
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+
+            video.srcObject = null;
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            updateStatus('detecting', '已停止', '点击"开始检测"重新启动');
+
+            addLog('检测已停止', 'info');
+        }
+
+        async function captureAndDetect() {
+            if (!stream || !video.videoWidth) return;
+
+            try {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const imageData = canvas.toDataURL('image/jpeg', 0.8);
+                
+                const startTime = performance.now();
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: imageData }),
+                });
+
+                const clientLatency = Math.round(performance.now() - startTime);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const result = await response.json();
+                detectCount++;
+
+                if (result.presence) {
+                    successCount++;
+                    updateStatus('present', '有人', result.debug_info);
+                    addLog(`检测到人体 (置信度: ${Math.round(result.confidence * 100)}%, 骨骼点: ${result.landmarks_count})`, 'present');
+                } else {
+                    updateStatus('absent', '无人', result.debug_info);
+                    addLog(`未检测到人体 - ${result.debug_info}`, 'absent');
+                }
+
+                updateStats(result, clientLatency);
+
+            } catch (err) {
+                addLog('检测请求失败: ' + err.message, 'error');
+                updateStatus('absent', '错误', err.message);
+            }
+        }
+
+        function updateStatus(state, text, debug) {
+            const indicator = document.getElementById('indicator');
+            const statusText = document.getElementById('statusText');
+            const debugInfo = document.getElementById('debugInfo');
+
+            indicator.className = 'presence-indicator ' + state;
+            statusText.className = 'status-text ' + state;
+            statusText.textContent = text;
+            debugInfo.textContent = debug || '';
+
+            if (state === 'present') {
+                indicator.textContent = '✓';
+            } else if (state === 'absent') {
+                indicator.textContent = '✗';
+            } else {
+                indicator.textContent = '?';
+            }
+        }
+
+        function updateStats(result, clientLatency) {
+            const latencyEl = document.getElementById('latency');
+            const confidenceEl = document.getElementById('confidence');
+            const landmarksEl = document.getElementById('landmarks');
+            const detectCountEl = document.getElementById('detectCount');
+            const successRateEl = document.getElementById('successRate');
+
+            const latency = result.latency_ms || clientLatency;
+            latencyEl.textContent = latency + ' ms';
+            latencyEl.className = 'stat-value ' + (latency < 200 ? 'good' : latency < 500 ? 'warning' : 'bad');
+
+            const conf = Math.round(result.confidence * 100);
+            confidenceEl.textContent = conf + '%';
+            confidenceEl.className = 'stat-value ' + (conf > 70 ? 'good' : conf > 40 ? 'warning' : 'bad');
+
+            landmarksEl.textContent = result.landmarks_count;
+
+            detectCountEl.textContent = detectCount;
+
+            const rate = Math.round((successCount / detectCount) * 100);
+            successRateEl.textContent = rate + '%';
+            successRateEl.className = 'stat-value ' + (rate > 80 ? 'good' : rate > 50 ? 'warning' : 'bad');
+        }
+
+        function addLog(message, type = 'info') {
+            const logContent = document.getElementById('logContent');
+            const time = new Date().toLocaleTimeString();
+            
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="log-time">[${time}]</span>
+                <span class="log-${type}">${message}</span>
+            `;
+
+            logContent.appendChild(entry);
+            logContent.scrollTop = logContent.scrollHeight;
+
+            while (logContent.children.length > 50) {
+                logContent.removeChild(logContent.firstChild);
+            }
+        }
+
+        function clearLog() {
+            const logContent = document.getElementById('logContent');
+            logContent.innerHTML = '';
+            addLog('日志已清空', 'info');
+        }
+
+        function showError(message) {
+            const banner = document.getElementById('errorBanner');
+            document.getElementById('errorMessage').textContent = message;
+            banner.classList.add('show');
+        }
+
+        function hideError() {
+            document.getElementById('errorBanner').classList.remove('show');
+        }
+
+        window.addEventListener('beforeunload', stopDetection);
+    </script>
+</body>
+</html>
