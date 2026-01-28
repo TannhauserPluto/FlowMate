@@ -1,15 +1,14 @@
-"""
+﻿"""
 FlowMate-Echo Voice Pipeline Service
-ASR (SenseVoice) -> LLM (Qwen-Max) -> TTS (CosyVoice)
+ASR (SenseVoice) -> LLM (routing) -> TTS (CosyVoice)
 """
 
-import asyncio
 import time
 from typing import Dict, Optional
 
 from .modelscope_audio import audio_service
-from .dashscope_service import dashscope_service
 from .sensevoice_asr import sensevoice_service
+from .interaction_service import process_user_intent
 
 
 class VoicePipelineService:
@@ -17,7 +16,6 @@ class VoicePipelineService:
 
     def __init__(self):
         self.asr = sensevoice_service
-        self.llm = dashscope_service
         self.tts = audio_service
 
     async def handle(
@@ -37,9 +35,18 @@ class VoicePipelineService:
 
         llm_start = time.perf_counter()
         if user_text:
-            reply_text = await self._call_llm(user_text, user_emotion)
+            interaction = await process_user_intent(user_text, user_emotion)
+            reply_text = (interaction.get("audio_text") or "").strip()
+            if not reply_text:
+                reply_text = "好的，我明白了，有需要随时告诉我。"
+                interaction["audio_text"] = reply_text
         else:
-            reply_text = "刚才没听清楚，可以再说一遍吗？"
+            interaction = {
+                "type": "chat",
+                "audio_text": "刚才没听清楚，可以再说一遍吗？",
+                "ui_payload": None,
+            }
+            reply_text = interaction["audio_text"]
         llm_ms = int((time.perf_counter() - llm_start) * 1000)
 
         tts_emotion = self._map_emotion(user_emotion)
@@ -69,6 +76,7 @@ class VoicePipelineService:
                     "text": reply_text,
                     "emotion": tts_emotion,
                 },
+                "interaction": interaction,
                 "audio": {
                     "base64": tts_result.get("audio_data", ""),
                     "format": tts_result.get("format", "mp3"),
@@ -94,12 +102,6 @@ class VoicePipelineService:
             response["error"] = error_payload
 
         return response
-
-    async def _call_llm(self, user_text: str, user_emotion: str) -> str:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.llm.generate_reply_from_asr, user_text, user_emotion
-        )
 
     def _map_emotion(self, user_emotion: str) -> str:
         key = (user_emotion or "neutral").lower()

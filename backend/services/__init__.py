@@ -10,6 +10,13 @@ from .screen_agent import ScreenAgentService, screen_agent
 from .oss_uploader import OSSUploader, oss_uploader
 from .sensevoice_asr import SenseVoiceService, sensevoice_service
 from .voice_pipeline import VoicePipelineService, voice_pipeline_service
+from .interaction_service import (
+    InteractionResponse,
+    BreakdownPayload,
+    CommandPayload,
+    TaskBreakdown,
+    process_user_intent,
+)
 
 __all__ = [
     "ModelScopeVision",
@@ -31,4 +38,9 @@ __all__ = [
     "sensevoice_service",
     "VoicePipelineService",
     "voice_pipeline_service",
+    "InteractionResponse",
+    "BreakdownPayload",
+    "CommandPayload",
+    "TaskBreakdown",
+    "process_user_intent",
 ]

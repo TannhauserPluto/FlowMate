@@ -149,6 +149,81 @@ class DashScopeService:
 
         return ["打开相关软件", "新建工作文件", "写下第一行内容"]
 
+    def classify_intent(self, user_text: str) -> str:
+        """Classify user intent as chat or breakdown using LLM with fallback rules."""
+        text = (user_text or "").strip()
+        if not text:
+            return "chat"
+
+        system_prompt = (
+            "你是一个意图路由器，只能输出 JSON："
+            "{\"intent\":\"chat\"} 或 {\"intent\":\"breakdown\"}。"
+            "当用户表达卡住、不会、不知道怎么开始、启动困难、"
+            "想要拆解任务时输出 breakdown；普通闲聊输出 chat。"
+            "不要输出任何其它内容。"
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ]
+
+        response = self._call_qwen(messages, max_tokens=30, temperature=0.1)
+        if response:
+            try:
+                data = json.loads(response)
+                intent = str(data.get("intent", "")).lower()
+                if intent in ("chat", "breakdown"):
+                    return intent
+            except json.JSONDecodeError:
+                try:
+                    match = re.search(r"\{[\s\S]*?\}", response)
+                    if match:
+                        data = json.loads(match.group())
+                        intent = str(data.get("intent", "")).lower()
+                        if intent in ("chat", "breakdown"):
+                            return intent
+                except json.JSONDecodeError:
+                    pass
+
+        text_lower = text.lower()
+        breakdown_keywords = [
+            "卡",
+            "难",
+            "不会",
+            "不知道",
+            "怎么开始",
+            "启动困难",
+            "想要拆解",
+            "拆解",
+        ]
+        if any(keyword in text_lower for keyword in breakdown_keywords):
+            return "breakdown"
+        return "chat"
+
+    def summarize_breakdown(self, task: str, steps: List[str]) -> str:
+        """Summarize breakdown into a short, spoken suggestion."""
+        if not steps:
+            return "我已经帮你拆解了一下，我们先从第一步开始吧。"
+
+        system_prompt = (
+            "你是一个口语化的工作伙伴。"
+            "根据任务和步骤，用一句简短的话建议从第一步开始，"
+            "不要列出多步，不要输出列表。"
+        )
+        user_prompt = f"任务：{task}\n步骤：{steps}\n请输出一句话建议。"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = self._call_qwen(messages, max_tokens=60, temperature=0.6)
+        if response:
+            return response.strip()
+
+        return f"这确实有点难，我们先从“{steps[0]}”开始吧。"
+
     def chat(
         self,
         message: str,
