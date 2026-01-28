@@ -1,6 +1,6 @@
 """
 FlowMate-Echo Brain API
-Decomposition Agent 和 Chat Agent 路由
+Decomposition Agent、Chat Agent 和 Screen Focus Audit 路由
 """
 
 from fastapi import APIRouter, HTTPException
@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 
 from services.dashscope_service import dashscope_service
+from services.screen_agent import screen_agent
 
 router = APIRouter()
 
@@ -29,6 +30,24 @@ class ChatResponse(BaseModel):
     """闲聊响应"""
     reply: str
     emotion: str
+
+
+class ScreenAuditRequest(BaseModel):
+    """屏幕审计请求"""
+    image: str  # Base64 格式的屏幕截图
+    current_task: str  # 用户当前任务描述，例如 "完成毕业论文"
+
+
+class ScreenAuditResponse(BaseModel):
+    """屏幕审计响应"""
+    is_focused: bool  # 是否专注
+    score: int  # 专注度分数 (0-100)
+    analysis: str  # 分析说明
+    suggestion: str  # 建议
+    source: Optional[str] = None  # 结果来源: cache / visual_skip / llm / mock / error
+    cooldown_remaining: Optional[int] = None  # 冷却剩余时间（秒）
+    visual_diff: Optional[float] = None  # 视觉差异比例
+    error: Optional[str] = None  # 错误信息（如有）
 
 
 # ==================== API 路由 ====================
@@ -115,3 +134,75 @@ async def chat(request: ChatRequest):
             reply="我在这里陪着你，有什么需要帮忙的吗",
             emotion="neutral",
         )
+
+
+# ==================== Screen Focus Audit ====================
+
+@router.post("/audit/screen", response_model=ScreenAuditResponse)
+async def audit_screen(request: ScreenAuditRequest):
+    """
+    Screen Focus Audit - 屏幕专注度审计接口
+    
+    通过分析用户的实时屏幕截图，判断用户当前是否专注于设定的任务。
+    
+    **双重过滤机制 (Double Throttling Strategy):**
+    1. 时间冷却：10分钟内不重复调用大模型 API
+    2. 视觉防抖：屏幕无变化时跳过 API 调用
+    
+    **输入:**
+    - image: Base64 格式的屏幕截图
+    - current_task: 用户当前任务描述
+    
+    **输出:**
+    - is_focused: 是否专注 (bool)
+    - score: 专注度分数 (0-100)
+    - analysis: 分析说明
+    - suggestion: 建议
+    - source: 结果来源 (cache/visual_skip/llm/mock/error)
+    """
+    if not request.image:
+        raise HTTPException(status_code=400, detail="屏幕截图不能为空")
+    
+    if not request.current_task or not request.current_task.strip():
+        raise HTTPException(status_code=400, detail="当前任务描述不能为空")
+    
+    current_task = request.current_task.strip()
+    
+    if len(current_task) > 200:
+        raise HTTPException(status_code=400, detail="任务描述过长，请控制在200字以内")
+    
+    try:
+        result = await screen_agent.audit_screen(request.image, current_task)
+        return ScreenAuditResponse(**result)
+    except Exception as e:
+        print(f"Screen audit error: {e}")
+        # 返回中性结果，避免前端报错
+        return ScreenAuditResponse(
+            is_focused=True,
+            score=50,
+            analysis="审计服务暂时不可用",
+            suggestion="请继续工作",
+            source="error",
+            error=str(e),
+        )
+
+
+@router.get("/audit/status")
+async def get_audit_status():
+    """
+    获取屏幕审计服务状态
+    
+    用于调试和监控，返回服务当前的内部状态。
+    """
+    return screen_agent.get_status()
+
+
+@router.post("/audit/reset")
+async def reset_audit_cache():
+    """
+    重置屏幕审计缓存
+    
+    用于测试，清除所有缓存状态，重新开始计时。
+    """
+    screen_agent.reset_cache()
+    return {"message": "缓存已重置", "status": screen_agent.get_status()}
