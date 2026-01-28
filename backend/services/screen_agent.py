@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+import os
 from config import settings
 
 # Short backoff after API errors to avoid rapid retries
@@ -47,7 +48,8 @@ class ScreenAgentService:
     _instance: Optional['ScreenAgentService'] = None
     
     # ==================== 配置常量 ====================
-    MOCK_MODE: bool = False  # 开发开关：True 时跳过所有逻辑，返回测试数据
+    # Mock 开关：环境变量优先，其次 DEBUG_MODE
+    MOCK_MODE: bool = os.getenv("SCREEN_MOCK_MODE", "false").lower() == "true" or settings.DEBUG_MODE
     
     TIME_COOLDOWN_SECONDS: int = 600  # 时间冷却：10分钟 = 600秒
     VISUAL_DIFF_THRESHOLD: float = 0.01  # 视觉变化阈值：1%
@@ -315,10 +317,6 @@ class ScreenAgentService:
         "is_focused": false
         }
         """
-
-        
-        
-        
 
         try:
             # 异步调用 DashScope (在线程池中执行同步调用)

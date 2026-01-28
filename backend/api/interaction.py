@@ -1,66 +1,77 @@
 """
 FlowMate-Echo Interaction API
-交互相关的 API 路由
+Interaction-related routes
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from pathlib import Path
 
 from core import agent_brain, flow_manager
-from services import audio_service
+from services import audio_service, voice_pipeline_service
 
 router = APIRouter()
 
 
 class TaskGenerationRequest(BaseModel):
-    """任务生成请求"""
+    """Task generation request."""
     task_description: str
 
 
 class TaskGenerationResponse(BaseModel):
-    """任务生成响应"""
+    """Task generation response."""
     tasks: List[str]
     original_description: str
 
 
 class AIResponseRequest(BaseModel):
-    """AI 响应请求"""
+    """AI response request."""
     flow_state: str
-    work_duration: int  # 秒
+    work_duration: int  # seconds
     fatigue_level: int  # 0-100
 
 
 class AIResponseResult(BaseModel):
-    """AI 响应结果"""
+    """AI response result."""
     action: str  # speak, animate, task, break
     content: str
     audio_url: Optional[str] = None
 
 
 class SpeechSynthesisRequest(BaseModel):
-    """语音合成请求"""
+    """Speech synthesis request."""
     text: str
     voice: str = "longxiaochun"
 
 
+class SpeakRequest(BaseModel):
+    """Voice + motion driver request."""
+    text: str
+    emotion: str  # strict / encouraging / neutral / shush
+
+
+class VoicePipelineResponse(BaseModel):
+    """Voice pipeline response (ASR -> LLM -> TTS)."""
+    status: str
+
+
 class ChatRequest(BaseModel):
-    """聊天请求"""
+    """Chat request."""
     message: str
     context: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
-    """聊天响应"""
+    """Chat response."""
     reply: str
     audio_url: Optional[str] = None
 
 
 @router.post("/generate-tasks", response_model=TaskGenerationResponse)
 async def generate_tasks(request: TaskGenerationRequest):
-    """生成任务拆解"""
+    """Generate task breakdown."""
     try:
         tasks = await agent_brain.generate_task_breakdown(request.task_description)
         return TaskGenerationResponse(
@@ -73,24 +84,21 @@ async def generate_tasks(request: TaskGenerationRequest):
 
 @router.post("/get-response", response_model=AIResponseResult)
 async def get_ai_response(request: AIResponseRequest):
-    """获取 AI 响应 (鼓励/提醒)"""
+    """Get AI response (encouragement/reminder)."""
     try:
-        # 生成鼓励语
         content = await agent_brain.generate_encouragement(
             flow_state=request.flow_state,
             work_duration=request.work_duration,
             fatigue_level=request.fatigue_level,
         )
 
-        # 决定响应类型
         if request.fatigue_level >= 70:
             action = "break"
         elif request.flow_state == "flow":
-            action = "animate"  # 只做动作，不打扰
+            action = "animate"  # animation only
         else:
             action = "speak"
 
-        # 生成语音 (非心流状态)
         audio_url = None
         if action == "speak":
             audio_path = await audio_service.synthesize(content)
@@ -108,7 +116,7 @@ async def get_ai_response(request: AIResponseRequest):
 
 @router.post("/synthesize-speech")
 async def synthesize_speech(request: SpeechSynthesisRequest):
-    """语音合成"""
+    """Speech synthesis (Deprecated: use /speak)."""
     try:
         audio_path = await audio_service.synthesize(request.text, request.voice)
         if audio_path:
@@ -121,13 +129,62 @@ async def synthesize_speech(request: SpeechSynthesisRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/speak")
+async def speak(request: SpeakRequest):
+    """Voice synthesis + motion driver (primary endpoint)."""
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    result = await audio_service.speak(request.text.strip(), request.emotion)
+
+    payload = {
+        "status": result.get("status", "success"),
+        "data": {
+            "audio": {
+                "base64": result.get("audio_data", ""),
+                "format": result.get("format", "mp3"),
+                "sample_rate": result.get("sample_rate", 24000),
+                "estimated_duration_ms": result.get("estimated_duration_ms", 0),
+            },
+            "driver": {
+                "motion_trigger": result.get("motion_trigger", "idle_breathing"),
+                "expression_trigger": result.get("expression_trigger", "neutral"),
+                "subtitle": result.get("subtitle", request.text.strip()),
+            },
+        },
+    }
+    error = result.get("error")
+    if error:
+        payload["error"] = error
+    return payload
+
+
+@router.post("/voice")
+async def voice_chat(
+    audio: UploadFile = File(...),
+    context: Optional[str] = Form(None),
+):
+    """Voice pipeline: ASR -> LLM -> TTS."""
+    try:
+        audio_bytes = await audio.read()
+        result = await voice_pipeline_service.handle(
+            audio_bytes=audio_bytes,
+            filename=audio.filename,
+            content_type=audio.content_type,
+        )
+        # Context is reserved for future use (e.g., memory injection)
+        _ = context
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """聊天对话"""
+    """Chat endpoint."""
     try:
         reply = await agent_brain.chat(request.message, request.context)
 
-        # 生成语音
         audio_url = None
         audio_path = await audio_service.synthesize(reply)
         if audio_path:
@@ -143,7 +200,7 @@ async def chat(request: ChatRequest):
 
 @router.get("/audio/{filename}")
 async def get_audio(filename: str):
-    """获取音频文件"""
+    """Get audio file."""
     from config import settings
 
     audio_path = settings.AUDIO_CACHE_DIR / filename
@@ -158,7 +215,7 @@ async def get_audio(filename: str):
 
 @router.get("/encouragement")
 async def get_encouragement():
-    """获取当前状态的鼓励语"""
+    """Get encouragement for current state."""
     try:
         info = flow_manager.get_session_info()
         state = info.get("state", "idle")

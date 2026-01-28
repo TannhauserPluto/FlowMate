@@ -206,6 +206,33 @@ class DashScopeService:
         # 回退响应
         return {"reply": self._get_fallback_chat(message), "emotion": emotion}
 
+    def generate_reply_from_asr(self, user_text: str, user_emotion: str) -> str:
+        """
+        Generate a short reply for the voice pipeline.
+        Emotion is used as context only; TTS emotion is rule-based elsewhere.
+        """
+        system_prompt = (
+            "你是 FlowMate，一个温和且坚定的效率伙伴。"
+            "请用中文回复，1-2 句话，简洁、友好、支持用户。"
+        )
+
+        user_prompt = (
+            f"用户情绪（仅供参考）：{user_emotion}\n"
+            f"用户说：{user_text}\n"
+            "请以 FlowMate 的口吻回复："
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = self._call_qwen(messages, max_tokens=120, temperature=0.7)
+        if response:
+            return response.strip()
+
+        return "我在这里陪着你。可以再说一遍吗？"
+
     def _detect_emotion(self, message: str) -> str:
         """简单的情绪检测"""
         message_lower = message.lower()

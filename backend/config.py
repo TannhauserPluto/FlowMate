@@ -29,6 +29,10 @@ class Settings(BaseModel):
     QWEN_VL_MODEL: str = os.getenv("QWEN_VL_MODEL", "qwen-vl-plus")
     QWEN_MAX_MODEL: str = os.getenv("QWEN_MAX_MODEL", "qwen-max")
     COSYVOICE_MODEL: str = os.getenv("COSYVOICE_MODEL", "iic/CosyVoice-300M-SFT")
+    SENSEVOICE_MODEL: str = os.getenv("SENSEVOICE_MODEL", "sensevoice-v1")
+    SENSEVOICE_SAMPLE_RATE: int = int(os.getenv("SENSEVOICE_SAMPLE_RATE", "16000"))
+    SENSEVOICE_AUDIO_FORMAT: str = os.getenv("SENSEVOICE_AUDIO_FORMAT", "wav")
+    SENSEVOICE_TIMEOUT_SECONDS: int = int(os.getenv("SENSEVOICE_TIMEOUT_SECONDS", "20"))
 
     # 功能开关
     ENABLE_CAMERA: bool = os.getenv("ENABLE_CAMERA", "true").lower() == "true"

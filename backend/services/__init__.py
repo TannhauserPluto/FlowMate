@@ -7,6 +7,9 @@ from .modelscope_audio import ModelScopeAudio, audio_service
 from .fatigue_detector import FatigueDetector, FatigueMetrics, fatigue_detector
 from .dashscope_service import DashScopeService, dashscope_service
 from .screen_agent import ScreenAgentService, screen_agent
+from .oss_uploader import OSSUploader, oss_uploader
+from .sensevoice_asr import SenseVoiceService, sensevoice_service
+from .voice_pipeline import VoicePipelineService, voice_pipeline_service
 
 __all__ = [
     "ModelScopeVision",
@@ -22,4 +25,10 @@ __all__ = [
     "dashscope_service",
     "ScreenAgentService",
     "screen_agent",
+    "OSSUploader",
+    "oss_uploader",
+    "SenseVoiceService",
+    "sensevoice_service",
+    "VoicePipelineService",
+    "voice_pipeline_service",
 ]

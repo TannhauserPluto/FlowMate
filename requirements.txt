@@ -30,3 +30,4 @@ python-dotenv>=1.0.0
 # 其他工具
 pydantic>=2.5.0
 httpx>=0.25.0
+oss2>=2.18.0
