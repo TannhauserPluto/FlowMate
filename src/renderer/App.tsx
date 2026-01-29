@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useRef, useState } from 'react';
+﻿import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import UiScaleFrame from './components/UiScaleFrame';
 import VoiceInput from './components/VoiceInput';
 import imgAudioWave from './assets/figma/audio-wave.png';
@@ -8,22 +8,112 @@ import imgMute from './assets/figma/mute.png';
 import imgInnerBg from './assets/figma/inner-bg.png';
 import imgNavAvatar from './assets/figma/nav-avatar.png';
 import imgInnerBgTask from './assets/figma/inner-bg-task.png';
-import imgTodoDot from './assets/figma/todo-dot.png';
-import imgTodoLine from './assets/figma/todo-line.png';
+import TimeWheelPicker from './components/TimeWheelPicker';
+
+
+type TodoItem = {
+  id: string;
+  text: string;
+};
 
 const App: React.FC = () => {
   const [isTaskRunning, setIsTaskRunning] = useState(false);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([
+    { id: 'todo-1', text: '明确论文基本信息' },
+    { id: 'todo-2', text: '头脑风暴 3–5 个可写选题' },
+    { id: 'todo-3', text: '搜索并筛选文献' },
+  ]);
+  const [doneItems, setDoneItems] = useState<TodoItem[]>([]);
+  const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
+
   const taskInputRef = useRef<HTMLInputElement | null>(null);
+  const todoRefs = useRef(new Map<string, HTMLLIElement>());
+  const doneRefs = useRef(new Map<string, HTMLLIElement>());
+  const todoPositions = useRef(new Map<string, DOMRect>());
+  const donePositions = useRef(new Map<string, DOMRect>());
 
   const activateTaskRunning = () => {
     if (!isTaskRunning) setIsTaskRunning(true);
   };
+
+  const animateList = (
+    items: TodoItem[],
+    refs: React.MutableRefObject<Map<string, HTMLLIElement>>,
+    positions: React.MutableRefObject<Map<string, DOMRect>>,
+  ) => {
+    const nextPositions = new Map<string, DOMRect>();
+    items.forEach((item) => {
+      const node = refs.current.get(item.id);
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      nextPositions.set(item.id, rect);
+      const prev = positions.current.get(item.id);
+      if (prev) {
+        const dx = prev.left - rect.left;
+        const dy = prev.top - rect.top;
+        if (dx !== 0 || dy !== 0) {
+          node.animate(
+            [
+              { transform: `translate(${dx}px, ${dy}px)` },
+              { transform: 'translate(0, 0)' },
+            ],
+            { duration: 220, easing: 'cubic-bezier(0.2, 0, 0.2, 1)' },
+          );
+        }
+      }
+    });
+    positions.current = nextPositions;
+  };
+
+  useLayoutEffect(() => {
+    animateList(todoItems, todoRefs, todoPositions);
+  }, [todoItems]);
+
+  useLayoutEffect(() => {
+    animateList(doneItems, doneRefs, donePositions);
+  }, [doneItems]);
 
   useEffect(() => {
     if (isTaskRunning) {
       taskInputRef.current?.focus();
     }
   }, [isTaskRunning]);
+
+  const markTodoDone = (id: string) => {
+    if (transitioning[id]) return;
+    const item = todoItems.find((todo) => todo.id === id);
+    if (!item) return;
+    if (doneItems.some((todo) => todo.id === id)) return;
+
+    setTransitioning((prev) => ({ ...prev, [id]: 'toDone' }));
+    window.setTimeout(() => {
+      setTodoItems((prevTodos) => prevTodos.filter((todo) => todo.id !== id));
+      setDoneItems((prevDone) => [...prevDone.filter((todo) => todo.id !== id), item]);
+      setTransitioning((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }, 220);
+  };
+
+  const restoreTodo = (id: string) => {
+    if (transitioning[id]) return;
+    const item = doneItems.find((todo) => todo.id === id);
+    if (!item) return;
+    if (todoItems.some((todo) => todo.id === id)) return;
+
+    setTransitioning((prev) => ({ ...prev, [id]: 'toTodo' }));
+    window.setTimeout(() => {
+      setDoneItems((prevDone) => prevDone.filter((todo) => todo.id !== id));
+      setTodoItems((prevTodos) => [...prevTodos.filter((todo) => todo.id !== id), item]);
+      setTransitioning((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }, 220);
+  };
 
   return (
     <div className="app-shell">
@@ -49,7 +139,9 @@ const App: React.FC = () => {
                 <img className="left-pane-bg-image" src={imgInnerBgTask} alt="" />
                 <div className="left-pane-bg-gradient" />
               </div>
-              <div className="countdown">0:25:00</div>
+              <div className="countdown">
+                <TimeWheelPicker />
+              </div>
               <div className="avatar-image" data-name="Gemini" data-node-id="262:231">
                 <img src={imgGemini} alt="" />
               </div>
@@ -76,7 +168,7 @@ const App: React.FC = () => {
               <div className="task-panel-content">
                 <div className="task-scroll">
                   <div className="chat-block">
-                    <div className="chat-bubble chat-bubble-user">
+                    <div className="chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
                       我需要写一篇关于数字媒体交互的论文
                     </div>
                     <div className="chat-bubble chat-bubble-assistant">
@@ -85,31 +177,69 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div className="todo-card">
-                    <div className="todo-header">
-                      <div className="todo-date">1/26/2026</div>
-                      <div className="todo-title">TO DO</div>
-                      <div className="todo-title todo-title-done">DONE</div>
-                      <div className="todo-project">数字媒体论文</div>
+                    <div className="todo-meta">
+                      <span className="todo-date">1/26/2026</span>
+                      <span className="todo-project">数字媒体论文</span>
                     </div>
-                    <div className="todo-body">
-                      <div className="todo-line">
-                        <img src={imgTodoLine} alt="" />
-                      </div>
-                      <ul className="todo-list">
-                        <li>
-                          <img src={imgTodoDot} alt="" />
-                          明确论文基本信息
-                        </li>
-                        <li>
-                          <img src={imgTodoDot} alt="" />
-                          头脑风暴 3–5 个可写选题
-                        </li>
-                        <li>
-                          <img src={imgTodoDot} alt="" />
-                          搜索并筛选文献
-                        </li>
-                      </ul>
-                    </div>
+                    <div className="todo-title-row">TO DO</div>
+                    <ul className="todo-list todo-list--todo">
+                      {todoItems.map((item) => {
+                        const transition = transitioning[item.id];
+                        return (
+                          <li
+                            key={item.id}
+                            ref={(node) => {
+                              if (node) {
+                                todoRefs.current.set(item.id, node);
+                              } else {
+                                todoRefs.current.delete(item.id);
+                              }
+                            }}
+                            className={`todo-item ${transition === 'toDone' ? 'is-completing' : ''}`}
+                          >
+                            <button
+                              className="todo-check"
+                              type="button"
+                              aria-label="Mark done"
+                              onClick={() => markTodoDone(item.id)}
+                            >
+                              <span className="todo-check-circle" />
+                            </button>
+                            <span className="todo-text">{item.text}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    <div className="todo-divider" />
+                    <div className="todo-title-row todo-title-done">DONE</div>
+                    <ul className="todo-list todo-list--done">
+                      {doneItems.map((item) => {
+                        const transition = transitioning[item.id];
+                        return (
+                          <li
+                            key={item.id}
+                            ref={(node) => {
+                              if (node) {
+                                doneRefs.current.set(item.id, node);
+                              } else {
+                                doneRefs.current.delete(item.id);
+                              }
+                            }}
+                            className={`todo-item is-done ${transition === 'toTodo' ? 'is-restoring' : ''}`}
+                          >
+                            <button
+                              className="todo-check"
+                              type="button"
+                              aria-label="Restore"
+                              onClick={() => restoreTodo(item.id)}
+                            >
+                              <span className="todo-check-circle" />
+                            </button>
+                            <span className="todo-text">{item.text}</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
                   </div>
                 </div>
                 <div className="task-input">
@@ -130,6 +260,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
-
-
