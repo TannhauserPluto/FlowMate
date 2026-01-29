@@ -26,7 +26,7 @@ function createWindow(): void {
 
   mainWindow.setAspectRatio(aspectRatio);
   mainWindow.setBounds({ width: baseWidth, height: baseHeight });
-  mainWindow.setMinimumSize(640, Math.round(640 / aspectRatio));
+  mainWindow.setMinimumSize(380, Math.round(380 / aspectRatio));
   mainWindow.setMaximumSize(1600, Math.round(1600 / aspectRatio));
 
   ipcMain.removeHandler('window:get-bounds');

@@ -16,6 +16,23 @@ body {
   user-select: none;
 }
 
+
+:root {
+  --glass-widget-bg: rgba(30, 30, 34, 0.18);
+  --glass-widget-highlight-1: rgba(255, 255, 255, 0.18);
+  --glass-widget-highlight-2: rgba(255, 255, 255, 0.06);
+  --glass-widget-border-start: rgba(255, 255, 255, 0.5);
+  --glass-widget-border-mid: rgba(255, 255, 255, 0.2);
+  --glass-widget-border-end: rgba(255, 255, 255, 0);
+  --glass-widget-blur: 32px;
+  --glass-widget-saturate: 140%;
+  --glass-widget-border-width: 0.77px;
+  --glass-widget-border-fade: 35%;
+  --glass-widget-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    inset 0 -1px 8px rgba(0, 0, 0, 0.25),
+    0 6px 18px rgba(0, 0, 0, 0.18);
+}
+
 /* Topmost glass container with fixed aspect ratio */
 .app-shell {
   position: fixed;
@@ -30,21 +47,42 @@ body {
   width: min(92vw, 985.766px);
   max-height: 92vh;
   aspect-ratio: 985.766 / 554.493;
-  --glass-radius: 35.426px;
+  --glass-radius: 21.894px;
   border-radius: var(--glass-radius);
   --glass-border-start: rgba(255, 255, 255, 0.4);
   --glass-border-end: rgba(128, 128, 128, 0.3);
   --glass-border-width: 0.77px;
   --glass-border-top-fade: 40%;/*上边：改 --glass-border-top-fade（数值越大，渐变越慢）*/
   --glass-border-left-fade: 30%;/*左边：改 --glass-border-left-fade（数值越大，渐变越慢）*/
-  background: rgba(128, 128, 128, 0.22);
-  background-blend-mode: luminosity;
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  --glass-fill-angle: 315deg;
+  background: rgba(69, 69, 74, 0.85);
+  backdrop-filter: blur(80px) saturate(200%);
+  -webkit-backdrop-filter: blur(80px) saturate(200%);
   display: flex;
   overflow: hidden;
   -webkit-app-region: drag;
   box-shadow: 0 0 0 0.4px rgba(255, 255, 255, 0.12);
+}
+
+.app-frame::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.02);
+  pointer-events: none;
+}
+
+.app-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-image: url("../assets/noise texture.jpg");
+  background-repeat: repeat;
+  background-size: 80px 80px;
+  opacity: 0.08;
+  pointer-events: none;
 }
 
 .app-container {
@@ -139,6 +177,40 @@ body {
   );
 }
 
+.glass-widget {
+  position: relative;
+}
+
+.glass-widget-surface {
+  background: var(--glass-widget-bg);
+  background-image:
+    linear-gradient(135deg, var(--glass-widget-highlight-1) 0%, rgba(255, 255, 255, 0) 55%),
+    linear-gradient(315deg, var(--glass-widget-highlight-2) 0%, rgba(255, 255, 255, 0) 60%);
+  background-blend-mode: screen, screen;
+  backdrop-filter: blur(var(--glass-widget-blur)) saturate(var(--glass-widget-saturate));
+  -webkit-backdrop-filter: blur(var(--glass-widget-blur)) saturate(var(--glass-widget-saturate));
+  box-shadow: var(--glass-widget-shadow);
+}
+
+.glass-widget--border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--glass-widget-border-width);
+  background: linear-gradient(
+    135deg,
+    var(--glass-widget-border-start) 0%,
+    var(--glass-widget-border-mid) var(--glass-widget-border-fade),
+    var(--glass-widget-border-end) 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
 .resize-overlay {
   position: absolute;
   inset: 0;
@@ -218,4 +290,275 @@ body {
   width: 14px;
   height: 14px;
   cursor: nwse-resize;
+}
+
+.app-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.window {
+  position: absolute;
+  inset: 0;
+}
+
+.nav-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 70.852px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18.483px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.nav-title {
+  font-family: 'SF Pro', 'Segoe UI', sans-serif;
+  font-size: 22.33px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.nav-avatar {
+  width: 33.886px;
+  height: 33.886px;
+  border-radius: 100px;
+  overflow: hidden;
+  flex: none;
+}
+
+.nav-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.inner-window {
+  position: absolute;
+  left: var(--inner-margin);
+  right: var(--inner-margin);
+  bottom: var(--inner-margin);
+  height: 461.415px;
+  border-radius: 21.894px;
+  overflow: hidden;
+}
+
+.inner-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.7;
+  border-radius: 21.894px;
+}
+
+.inner-gradient {
+  position: absolute;
+  inset: 0;
+  border-radius: 21.894px;
+  background: linear-gradient(
+    88.98deg,
+    rgba(0, 0, 0, 0.64) 0%,
+    rgba(0, 0, 0, 0.618) 8.1%,
+    rgba(0, 0, 0, 0.562) 15.5%,
+    rgba(0, 0, 0, 0.486) 22.5%,
+    rgba(0, 0, 0, 0.401) 29%,
+    rgba(0, 0, 0, 0.316) 35.3%,
+    rgba(0, 0, 0, 0.239) 41.2%,
+    rgba(0, 0, 0, 0.177) 47.1%,
+    rgba(0, 0, 0, 0.16) 100%
+  );
+  pointer-events: none;
+}
+
+.app-frame {
+  --inner-margin: 18.524px;
+}
+
+.left-pane {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 438.573px;
+  height: 461.415px;
+  overflow: hidden;
+}
+
+.avatar-image {
+  position: absolute;
+  left: 87%;
+  top: 36.55px;
+  width: 353.295px;
+  height: 424.867px;
+  transform: translateX(-50%);
+}
+
+.avatar-image img {
+  position: absolute;
+  width: 168.53%;
+  height: 140.06%;
+  left: -33.19%;
+  top: -10.39%;
+  object-fit: cover;
+}
+
+.mute-button {
+  position: absolute;
+  left: 14.73px;
+  top: 398.06px;
+  width: 54.545px;
+  height: 50px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 30.058px;
+}
+
+.mute-button-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: 30.058px;
+}
+
+
+.mute-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36.069px;
+  height: 36.069px;
+  border-radius: 75.144px;
+  display: grid;
+  place-items: center;
+}
+
+.mute-icon::before,
+.mute-icon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.mute-icon::before {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.mute-icon::after {
+  background: rgba(94, 94, 94, 0.18);
+  mix-blend-mode: color-dodge;
+}
+
+.mute-icon img {
+  width: 23.75px;
+  height: 23.75px;
+  position: relative;
+  z-index: 1;
+}
+
+.right-pane {
+  position: absolute;
+  left: 438.57px;
+  top: 3.05px;
+  width: 510.145px;
+  height: 458.369px;
+}
+
+.headline {
+  position: absolute;
+  left: 50%;
+  top: 179.69px;
+  transform: translateX(-50%);
+  font-size: 25.888px;
+  font-family: 'SF Pro', 'Segoe UI', sans-serif;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.voice-input {
+  position: absolute;
+  left: 50%;
+  bottom: 13.36px;
+  transform: translateX(-50%);
+  width: 462.492px;
+  height: 50.233px;
+  border-radius: 30.21px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 18px;
+}
+
+
+.voice-plus {
+  width: 24.251px;
+  height: 24.251px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.voice-plus img {
+  width: 24.251px;
+  height: 24.251px;
+}
+
+.voice-placeholder {
+  flex: 1;
+  font-size: 13.309px;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: 'PingFang HK', 'PingFang SC', 'Segoe UI', sans-serif;
+}
+
+.voice-action {
+  width: 36.252px;
+  height: 36.252px;
+  border-radius: 75.524px;
+  border: none;
+  background: transparent;
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.voice-action-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.voice-action::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(94, 94, 94, 0.18);
+  mix-blend-mode: color-dodge;
+}
+
+.voice-action img {
+  width: 18.933px;
+  height: 18.933px;
+  position: relative;
+  z-index: 1;
+}
+
+.ui-scale {
+  width: 985.766px;
+  height: 554.493px;
+  transform: scale(var(--ui-scale, 1));
+  transform-origin: top left;
 }
