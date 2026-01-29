@@ -19,7 +19,7 @@ body {
 
 :root {
   --glass-widget-bg: rgba(30, 30, 34, 0.18);
-  --glass-widget-highlight-1: rgba(255, 255, 255, 0.18);
+  --glass-widget-highlight-1: rgba(255, 255, 255, 0.20);
   --glass-widget-highlight-2: rgba(255, 255, 255, 0.06);
   --glass-widget-border-start: rgba(255, 255, 255, 0.5);
   --glass-widget-border-mid: rgba(255, 255, 255, 0.2);
@@ -47,7 +47,7 @@ body {
   width: min(92vw, 985.766px);
   max-height: 92vh;
   aspect-ratio: 985.766 / 554.493;
-  --glass-radius: 21.894px;
+  --glass-radius: calc(33px * var(--ui-scale, 1));
   border-radius: var(--glass-radius);
   --glass-border-start: rgba(255, 255, 255, 0.4);
   --glass-border-end: rgba(128, 128, 128, 0.3);
@@ -184,8 +184,8 @@ body {
 .glass-widget-surface {
   background: var(--glass-widget-bg);
   background-image:
-    linear-gradient(135deg, var(--glass-widget-highlight-1) 0%, rgba(255, 255, 255, 0) 55%),
-    linear-gradient(315deg, var(--glass-widget-highlight-2) 0%, rgba(255, 255, 255, 0) 60%);
+    linear-gradient(187deg, var(--glass-widget-highlight-1) 0%, rgba(255, 255, 255, 0) 55%),
+    linear-gradient(30deg, var(--glass-widget-highlight-2) 0%, rgba(255, 255, 255, 0) 60%);
   background-blend-mode: screen, screen;
   backdrop-filter: blur(var(--glass-widget-blur)) saturate(var(--glass-widget-saturate));
   -webkit-backdrop-filter: blur(var(--glass-widget-blur)) saturate(var(--glass-widget-saturate));
@@ -531,6 +531,8 @@ body {
   display: grid;
   place-items: center;
   padding: 0;
+  margin-left: 0;
+  transform: translateX(9.5px);
 }
 
 .voice-action-bg {
