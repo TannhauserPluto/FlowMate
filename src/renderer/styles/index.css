@@ -347,6 +347,7 @@ body {
   height: 461.415px;
   border-radius: 21.894px;
   overflow: hidden;
+  -webkit-app-region: no-drag;
 }
 
 .inner-bg {
@@ -496,6 +497,12 @@ body {
   align-items: center;
   gap: 14px;
   padding: 0 18px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.voice-input * {
+  -webkit-app-region: no-drag;
 }
 
 
@@ -563,4 +570,592 @@ body {
   height: 554.493px;
   transform: scale(var(--ui-scale, 1));
   transform-origin: top left;
+}
+
+.window {
+  position: absolute;
+  inset: 0;
+}
+
+.left-pane,
+.right-pane,
+.task-panel,
+.inner-bg,
+.inner-gradient,
+.countdown,
+.avatar-image {
+  transition: opacity 300ms ease, transform 300ms ease, width 300ms ease, height 300ms ease, top 300ms ease, left 300ms ease;
+}
+
+.left-pane-bg {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 300ms ease;
+}
+
+.left-pane-bg-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.7;
+}
+
+.left-pane-bg-gradient {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(89.53deg, rgba(0, 0, 0, 0.64) 1.23%, rgba(0, 0, 0, 0.32) 43.31%, rgba(0, 0, 0, 0.16) 99.57%);
+}
+
+.countdown {
+  position: absolute;
+  left: 50%;
+  top: 120px;
+  transform: translateX(-50%) translateY(8px);
+  font-family: 'ShigotoMemogaki', 'SF Pro', 'Segoe UI', sans-serif;
+  font-size: 64px;
+  color: #f8fdc0;
+  text-shadow: 0 6px 12px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+}
+
+.task-panel {
+  position: absolute;
+  left: 456.85px;
+  top: 74.62px;
+  width: 510.145px;
+  height: 458.369px;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateX(40px);
+  pointer-events: none;
+}
+
+.task-panel-content {
+  position: absolute;
+  left: 24.37px;
+  top: 0;
+  width: 473.597px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.chat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  align-items: flex-end;
+}
+
+.chat-bubble {
+  padding: 10px 16px;
+  border-radius: 18px;
+  font-size: 12.183px;
+  line-height: 1.6;
+  color: #fff;
+}
+
+.chat-bubble-user {
+  align-self: flex-end;
+  background: rgba(128, 128, 128, 0.05);
+}
+
+.chat-bubble-assistant {
+  align-self: stretch;
+  background: transparent;
+}
+
+.chat-bubble-assistant-secondary {
+  display: block;
+  margin-top: 10px;
+}
+
+.todo-card {
+  position: relative;
+  border-radius: 26.558px;
+  background: rgba(128, 128, 128, 0.5);
+  padding: 20px 20px 18px;
+  color: #fff;
+}
+
+.todo-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 16px;
+  font-size: 16.751px;
+}
+
+.todo-date {
+  font-size: 9.137px;
+  opacity: 0.9;
+}
+
+.todo-title {
+  font-weight: 500;
+}
+
+.todo-title-done {
+  justify-self: end;
+}
+
+.todo-project {
+  grid-column: span 2;
+  font-size: 9.137px;
+  opacity: 0.9;
+  text-align: right;
+}
+
+.todo-body {
+  position: relative;
+  margin-top: 14px;
+}
+
+.todo-line {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 1px;
+}
+
+.todo-line img {
+  width: 1px;
+  height: 100%;
+  object-fit: cover;
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12.183px;
+}
+
+.todo-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.todo-list img {
+  width: 10.66px;
+  height: 10.66px;
+}
+
+.task-input .voice-input {
+  width: 462.492px;
+}
+
+.start-work {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: 167px;
+  height: 63.258px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  color: #fff;
+}
+
+.start-work-icon {
+  width: 38.49px;
+  height: 38.49px;
+  border-radius: 80.188px;
+  display: grid;
+  place-items: center;
+}
+
+.start-work-icon img {
+  width: 27.067px;
+  height: 27.067px;
+}
+
+.start-work-text {
+  font-size: 19.266px;
+  line-height: 1.6;
+}
+
+.window.is-task-running .right-pane {
+  opacity: 0;
+  transform: translateX(40px);
+  pointer-events: none;
+}
+
+.window.is-task-running .task-panel {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.window.is-task-running .inner-bg,
+.window.is-task-running .inner-gradient {
+  opacity: 0;
+}
+
+.window.is-task-running .left-pane-bg {
+  opacity: 1;
+}
+
+.window.is-task-running .countdown {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.window.is-task-running .avatar-image {
+  width: 219.177px;
+  height: 263.579px;
+  top: 197.97px;
+  left: 50%;
+}
+
+/* Task panel refined */
+.task-panel-content {
+  gap: 31px;
+}
+
+.chat-block {
+  gap: 29px;
+}
+
+.chat-bubble {
+  border-radius: 26.558px;
+  font-size: 12.183px;
+}
+
+.chat-bubble-user {
+  width: 243.651px;
+  height: 44.162px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(128, 128, 128, 0.05);
+  mix-blend-mode: luminosity;
+}
+
+.chat-bubble-assistant {
+  width: 455.324px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.chat-bubble-assistant-secondary {
+  margin-top: 8px;
+}
+
+.todo-card {
+  width: 462.938px;
+  height: 205.581px;
+  border-radius: 26.558px;
+  background: rgba(128, 128, 128, 0.5);
+  mix-blend-mode: luminosity;
+  padding: 18px 20px;
+}
+
+.todo-header {
+  position: relative;
+  height: 40px;
+  display: block;
+  font-size: 16.751px;
+}
+
+.todo-date {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-size: 9.137px;
+}
+
+.todo-project {
+  position: absolute;
+  right: 0;
+  top: 0;
+  font-size: 9.137px;
+  text-align: right;
+}
+
+.todo-title {
+  position: absolute;
+  top: 18px;
+  font-weight: 500;
+}
+
+.todo-title:not(.todo-title-done) {
+  left: 140px;
+}
+
+.todo-title-done {
+  left: 0;
+}
+
+.todo-body {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  top: 62px;
+  bottom: 18px;
+  margin-top: 0;
+}
+
+.todo-line {
+  left: 50%;
+}
+
+.todo-list {
+  padding: 0;
+  gap: 12px;
+  position: absolute;
+  left: 120px;
+  top: 0;
+}
+
+.voice-text-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13.309px;
+  font-family: 'PingFang HK', 'PingFang SC', 'Segoe UI', sans-serif;
+  line-height: 1.2;
+  outline: none;
+}
+
+.voice-text-input::placeholder {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* inner-window overrides */
+.window:not(.is-task-running) .inner-window {
+  border: none;
+  box-shadow: none;
+}
+
+.window.is-task-running .task-panel {
+  border-top-right-radius: 21.894px;
+  border-bottom-right-radius: 21.894px;
+  overflow: hidden;
+}
+
+/* inner-bg rounding */
+.inner-window {
+  border-radius: 21.894px;
+  overflow: hidden;
+}
+
+.inner-bg,
+.inner-gradient {
+  border-radius: 21.894px;
+}
+
+.left-pane-bg {
+  border-radius: 21.894px;
+  overflow: hidden;
+}
+
+.window.is-task-running .left-pane-bg,
+.window.is-task-running .left-pane-bg-image,
+.window.is-task-running .left-pane-bg-gradient {
+  border-radius: 21.894px;
+  overflow: hidden;
+}
+
+/* task-running overrides v2 */
+.window.is-task-running .right-pane {
+  visibility: hidden;
+}
+
+.window.is-task-running .task-input {
+  margin-top: -30px;
+}
+
+.window.is-task-running .left-pane {
+  border-radius: 21.894px;
+  overflow: hidden;
+}
+
+.window.is-task-running .task-input .voice-plus,
+.window.is-task-running .task-input .voice-plus img {
+  visibility: visible;
+  opacity: 1;
+  display: grid;
+}
+
+/* task-running overrides v3 */
+.task-panel {
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.task-panel-content {
+  height: 100%;
+}
+
+.task-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding-right: 6px;
+}
+
+.window.is-task-running .task-panel {
+  transform: translateX(0) translateY(-8px);
+}
+
+.window.is-task-running .left-pane-bg-image,
+.window.is-task-running .left-pane-bg-gradient {
+  transform: translateY(-10px);
+}
+
+.window.is-task-running .task-input {
+  margin-top: -32px;
+}
+
+.window.is-task-running .task-input .voice-input {
+  transform: translateX(-12px);
+}
+
+/* task-running layout v4 */
+.window.is-task-running .task-panel {
+  left: 438.57px;
+  top: 3.05px;
+  width: 510.145px;
+  height: 458.369px;
+  transform: translateX(0) translateY(0);
+}
+
+.window.is-task-running .task-panel-content {
+  height: 458.369px;
+  gap: 31px;
+}
+
+.window.is-task-running .task-scroll {
+  gap: 31px;
+}
+
+.window.is-task-running .left-pane-bg-image,
+.window.is-task-running .left-pane-bg-gradient {
+  transform: none;
+}
+
+.window.is-task-running .task-input {
+  margin-top: auto;
+}
+
+.window.is-task-running .task-input .voice-input {
+  transform: none;
+}
+
+.window.is-task-running .chat-block {
+  width: 455.324px;
+  align-items: flex-start;
+  gap: 29px;
+}
+
+.window.is-task-running .chat-bubble-user {
+  align-self: flex-end;
+}
+
+.window.is-task-running .chat-bubble-assistant {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.window.is-task-running .chat-bubble-assistant-secondary {
+  align-self: flex-end;
+  max-width: 182.739px;
+  text-align: right;
+}
+
+.window.is-task-running .todo-card {
+  width: 462.938px;
+  height: 205.581px;
+  padding: 16px 18px;
+}
+
+.window.is-task-running .todo-header {
+  height: 44px;
+}
+
+.window.is-task-running .todo-date {
+  top: 0;
+  left: 0;
+}
+
+.window.is-task-running .todo-project {
+  top: 0;
+  right: 0;
+}
+
+.window.is-task-running .todo-title {
+  top: 22px;
+  left: 0;
+}
+
+.window.is-task-running .todo-title-done {
+  top: auto;
+  bottom: 14px;
+  left: 0;
+}
+
+.window.is-task-running .todo-body {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 64px;
+  bottom: 40px;
+}
+
+.window.is-task-running .todo-line {
+  left: 0;
+  right: 0;
+  bottom: 32px;
+  top: auto;
+  width: auto;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.window.is-task-running .todo-line img {
+  display: none;
+}
+
+.window.is-task-running .todo-list {
+  position: static;
+  padding: 0;
+  gap: 8px;
+}
+
+/* task-running layout v4b */
+.window.is-task-running .task-input {
+  position: relative;
+  height: 50.233px;
+}
+
+.window.is-task-running .task-input .voice-input {
+  position: relative;
+  left: 0;
+  bottom: 0;
+  transform: none;
+  width: 462.492px;
+}
+
+/* task-running layout v4c */
+.window.is-task-running .task-scroll {
+  align-items: flex-start;
 }
