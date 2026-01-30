@@ -10,7 +10,11 @@ import imgInnerBg from './assets/figma/inner-bg.png';
 import imgNavAvatar from './assets/figma/nav-avatar.png';
 import imgInnerBgTask from './assets/figma/inner-bg-task.png';
 import TimeWheelPicker from './components/TimeWheelPicker';
+import imgStars from './assets/figma/star.png';
+import imgJourneyLineGraph from './assets/figma/journey-line-graph.png';
 
+
+type View = 'home' | 'task' | 'profile';
 
 type TodoItem = {
   id: string;
@@ -18,8 +22,10 @@ type TodoItem = {
 };
 
 const App: React.FC = () => {
-  const [currentView, setCurrentView] = useState<'home' | 'task'>('home');
-  const isTaskRunning = currentView === 'task';
+  const [currentView, setCurrentView] = useState<View>('home');
+  const returnViewRef = useRef<View>('home');
+  const primaryView = currentView === 'profile' ? returnViewRef.current : currentView;
+  const isTaskRunning = primaryView === 'task';
   const [todoItems, setTodoItems] = useState<TodoItem[]>([
     { id: 'todo-1', text: '明确论文基本信息' },
     { id: 'todo-2', text: '头脑风暴 3–5 个可写选题' },
@@ -38,12 +44,29 @@ const App: React.FC = () => {
     if (currentView !== 'task') setCurrentView('task');
   };
 
+  const toggleProfilePanel = () => {
+    if (currentView === 'profile') {
+      setCurrentView(returnViewRef.current);
+      return;
+    }
+    returnViewRef.current = currentView;
+    setCurrentView('profile');
+  };
+
   const handleGoToTimerConfig = () => {
     console.log('go to timer config');
   };
 
   const handleStartWork = () => {
     console.log('start work');
+  };
+
+  const handleWindowMinimize = () => {
+    (window as any).electron?.invoke('window:minimize').catch(() => {});
+  };
+
+  const handleWindowClose = () => {
+    (window as any).electron?.invoke('window:close').catch(() => {});
   };
 
   const animateList = (
@@ -127,19 +150,41 @@ const App: React.FC = () => {
 
   return (
     <div className="app-shell">
-      <div className="app-layout">
+      <div className={`app-layout ${currentView === 'profile' ? 'is-profile' : ''}`}>
         <UiScaleFrame>
           <div
-            className={`window ${isTaskRunning ? 'is-task-running' : ''}`}
+            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${currentView === 'profile' ? 'is-profile-open' : ''}`}
             data-name="Window"
             data-node-id="240:213"
           >
-            <div className="nav-bar" data-name="Navigation Bar" data-node-id="235:2089">
-              <div className="nav-title" data-node-id="I235:2089;127:82612">
-                FlowMate
+            <div className="nav-bar" data-name="Navigation Bar" data-node-id="403:419">
+              <div className="nav-left" data-node-id="304:291">
+                <button
+                  type="button"
+                  className="nav-avatar"
+                  data-name="Avatar"
+                  data-node-id="304:280"
+                  onClick={toggleProfilePanel}
+                  aria-label="User profile"
+                >
+                  <img src={imgNavAvatar} alt="" />
+                </button>
+                <div className="nav-title" data-node-id="304:272">
+                  FlowMate
+                </div>
               </div>
-              <div className="nav-avatar" data-name="Icons - Avatar" data-node-id="I235:2089;127:82627">
-                <img src={imgNavAvatar} alt="" />
+              <div className="nav-actions" data-node-id="400:266">
+                <button type="button" className="nav-action" aria-label="Minimize" onClick={handleWindowMinimize}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <line x1="6" y1="12" x2="18" y2="12" />
+                  </svg>
+                </button>
+                <button type="button" className="nav-action" aria-label="Close" onClick={handleWindowClose}>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <line x1="7" y1="7" x2="17" y2="17" />
+                    <line x1="17" y1="7" x2="7" y2="17" />
+                  </svg>
+                </button>
               </div>
             </div>
             <div className="inner-window" data-name="内窗" data-node-id="262:219">
@@ -264,10 +309,64 @@ const App: React.FC = () => {
                 </div>
               </div>
             </div>
+            <div className="profile-panel" role="dialog" aria-label="User profile">
+              <div className="profile-panel__card glass-widget glass-widget--border glass-widget-surface">
+                <div className="profile-top">
+                  <div className="profile-tabs">
+                    <button type="button" className="profile-tab is-active">日</button>
+                    <button type="button" className="profile-tab">月</button>
+                    <button type="button" className="profile-tab">年</button>
+                  </div>
+                  <div className="profile-filters">
+                    <label className="profile-filter">
+                      <span className="profile-filter__dot is-on" />
+                      已完成
+                    </label>
+                    <label className="profile-filter">
+                      <span className="profile-filter__dot" />
+                      未完成
+                    </label>
+                  </div>
+                </div>
+                <div className="profile-grid">
+                  <div className="profile-card profile-card--progress">
+                    <div className="profile-card__title">完成率</div>
+                    <div className="profile-card__value">87%</div>
+                  </div>
+                  <div className="profile-card profile-card--stars">
+                    <div className="profile-card__stars">
+                      <img src={imgStars} alt="" />
+                    </div>
+                  </div>
+                  <div className="profile-card profile-card--list profile-card--primary">
+                    <div className="profile-card__title">数字媒体论文</div>
+                    <ul className="profile-list">
+                      <li><span className="profile-dot" /> 访谈对象</li>
+                      <li><span className="profile-dot" /> 头脑风暴 3–5 个方案</li>
+                      <li><span className="profile-dot" /> 商业计划</li>
+                      <li className="divider" />
+                      <li className="section">学业相关</li>
+                      <li><span className="profile-dot" /> 假期返乡计划表</li>
+                      <li><span className="profile-dot" /> 毕设任务书</li>
+                    </ul>
+                  </div>
+                  <div className="profile-card profile-card--list profile-card--secondary">
+                    <div className="profile-card__title">学业相关</div>
+                    <ul className="profile-list">
+                      <li><span className="profile-dot" /> 假期劳务活动报名</li>
+                      <li><span className="profile-dot" /> 联系毕业老师</li>
+                    </ul>
+                  </div>
+                  <div className="profile-card profile-card--chart">
+                    <img className="profile-chart-image" src={imgJourneyLineGraph} alt="" />
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </UiScaleFrame>
         <ActionFloatingBtn
-          currentView={currentView}
+          currentView={primaryView}
           onGoToTimerConfig={handleGoToTimerConfig}
           onStartWork={handleStartWork}
         />

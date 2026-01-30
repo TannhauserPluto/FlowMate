@@ -2,7 +2,12 @@
 
 contextBridge.exposeInMainWorld('electron', {
   invoke: (channel: string, ...args: any[]) => {
-    const validChannels = ['window:get-bounds', 'window:set-bounds'];
+    const validChannels = [
+      'window:get-bounds',
+      'window:set-bounds',
+      'window:minimize',
+      'window:close',
+    ];
     if (validChannels.includes(channel)) {
       return ipcRenderer.invoke(channel, ...args);
     }

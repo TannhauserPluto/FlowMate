@@ -3,7 +3,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const electron_1 = require("electron");
 electron_1.contextBridge.exposeInMainWorld('electron', {
     invoke: (channel, ...args) => {
-        const validChannels = ['window:get-bounds', 'window:set-bounds'];
+        const validChannels = [
+            'window:get-bounds',
+            'window:set-bounds',
+            'window:minimize',
+            'window:close',
+        ];
         if (validChannels.includes(channel)) {
             return electron_1.ipcRenderer.invoke(channel, ...args);
         }

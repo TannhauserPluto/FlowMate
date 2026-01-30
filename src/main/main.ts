@@ -1,7 +1,11 @@
 ﻿import { app, BrowserWindow, ipcMain } from 'electron';
+import { Menu, Tray, nativeImage } from 'electron';
+import * as fs from 'fs';
 import * as path from 'path';
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let isQuitting = false;
 
 const isDev = !app.isPackaged;
 
@@ -29,8 +33,16 @@ function createWindow(): void {
   mainWindow.setMinimumSize(380, Math.round(380 / aspectRatio));
   mainWindow.setMaximumSize(1600, Math.round(1600 / aspectRatio));
 
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow?.hide();
+  });
+
   ipcMain.removeHandler('window:get-bounds');
   ipcMain.removeHandler('window:set-bounds');
+  ipcMain.removeHandler('window:minimize');
+  ipcMain.removeHandler('window:close');
   ipcMain.handle('window:get-bounds', () => mainWindow?.getBounds());
   ipcMain.handle('window:set-bounds', (_event, bounds) => {
     if (!mainWindow) return false;
@@ -57,6 +69,16 @@ function createWindow(): void {
     mainWindow.setBounds(nextBounds);
     return true;
   });
+  ipcMain.handle('window:minimize', () => {
+    if (!mainWindow) return false;
+    mainWindow.minimize();
+    return true;
+  });
+  ipcMain.handle('window:close', () => {
+    if (!mainWindow) return false;
+    mainWindow.close();
+    return true;
+  });
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
@@ -70,20 +92,67 @@ function createWindow(): void {
   });
 }
 
+function resolveTrayIconPath(): string | null {
+  const candidates = [
+    path.join(app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
+    path.join(app.getAppPath(), 'dist', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
+    path.join(__dirname, '../renderer/assets/figma/nav-avatar.png'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function createTray(): void {
+  if (tray) return;
+  const iconPath = resolveTrayIconPath();
+  const trayIcon = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+  tray = new Tray(trayIcon);
+  tray.setToolTip('FlowMate');
+
+  tray.on('click', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) {
+      mainWindow.focus();
+    } else {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '退出应用',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+  tray.setContextMenu(contextMenu);
+}
+
 app.whenReady().then(() => {
   createWindow();
+  createTray();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
+    mainWindow?.show();
   });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin' && isQuitting) {
     app.quit();
   }
+});
+
+app.on('before-quit', () => {
+  isQuitting = true;
 });
 
 export { mainWindow };

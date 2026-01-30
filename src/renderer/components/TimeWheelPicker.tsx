@@ -1,6 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import imgDigit0 from '../assets/digits/0.png';
+import imgDigit1 from '../assets/digits/1.png';
+import imgDigit2 from '../assets/digits/2.png';
+import imgDigit3 from '../assets/digits/3.png';
+import imgDigit4 from '../assets/digits/4.png';
+import imgDigit5 from '../assets/digits/5.png';
+import imgDigit6 from '../assets/digits/6.png';
+import imgDigit7 from '../assets/digits/7.png';
+import imgDigit8 from '../assets/digits/8.png';
+import imgDigit9 from '../assets/digits/9.png';
+import imgColon from '../assets/digits/：.png';
 
-const ITEM_HEIGHT = 44;
+const ITEM_HEIGHT = 32;
 const VIEW_HEIGHT = 160;
 const COLUMN_WIDTH = 56;
 const LOOP_REPEAT = 18;
@@ -9,6 +20,18 @@ const WHEEL_COOLDOWN = 100;
 const buildRange = (count: number) => Array.from({ length: count }, (_, i) => i);
 const DIGITS_0_9 = buildRange(10);
 const DIGITS_0_5 = buildRange(6);
+const DIGIT_IMAGES = [
+  imgDigit0,
+  imgDigit1,
+  imgDigit2,
+  imgDigit3,
+  imgDigit4,
+  imgDigit5,
+  imgDigit6,
+  imgDigit7,
+  imgDigit8,
+  imgDigit9,
+];
 
 type WheelColumnProps = {
   label: string;
@@ -177,7 +200,7 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
             aria-selected={isActive}
             role="option"
           >
-            {val}
+            <img className="time-wheel-digit" src={DIGIT_IMAGES[val]} alt={`${val}`} />
           </div>
         );
       })}
@@ -196,10 +219,10 @@ const TimeWheelPicker: React.FC = () => {
     <div className="time-wheel flex items-center justify-center" role="group" aria-label="Time picker">
       <div className="time-wheel-row flex items-center">
         <WheelColumn label="Hours" values={DIGITS_0_5} value={hour} onChange={setHour} />
-        <span className="time-wheel-separator">:</span>
+        <img className="time-wheel-separator" src={imgColon} alt=":" />
         <WheelColumn label="Minutes tens" values={DIGITS_0_5} value={minuteTens} onChange={setMinuteTens} />
         <WheelColumn label="Minutes ones" values={DIGITS_0_9} value={minuteOnes} onChange={setMinuteOnes} />
-        <span className="time-wheel-separator">:</span>
+        <img className="time-wheel-separator" src={imgColon} alt=":" />
         <WheelColumn label="Seconds tens" values={DIGITS_0_5} value={secondTens} onChange={setSecondTens} />
         <WheelColumn label="Seconds ones" values={DIGITS_0_9} value={secondOnes} onChange={setSecondOnes} />
       </div>
