@@ -37,15 +37,25 @@ body {
 .app-shell {
   position: fixed;
   inset: 0;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 24px;
   z-index: 999;
 }
 
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+
 .app-frame {
-  width: min(92vw, 985.766px);
-  max-height: 92vh;
+  --frame-ratio: 1.777;
+  width: min(90vw, 960px, calc(72vh * var(--frame-ratio)));
+  max-height: 72vh;
   aspect-ratio: 985.766 / 554.493;
   --glass-radius: calc(33px * var(--ui-scale, 1));
   border-radius: var(--glass-radius);
@@ -55,7 +65,7 @@ body {
   --glass-border-top-fade: 40%;/*上边：改 --glass-border-top-fade（数值越大，渐变越慢）*/
   --glass-border-left-fade: 30%;/*左边：改 --glass-border-left-fade（数值越大，渐变越慢）*/
   --glass-fill-angle: 315deg;
-  background: rgba(69, 69, 74, 0.85);
+  background: rgba(69, 69, 74, 0.85);/*主页面背景*/
   backdrop-filter: blur(80px) saturate(200%);
   -webkit-backdrop-filter: blur(80px) saturate(200%);
   display: flex;
@@ -1134,6 +1144,47 @@ body {
 
 .window.is-task-running .todo-item.is-done .todo-check-circle {
   background: rgba(255, 255, 255, 0.9);
+}
+
+/* floating action button */
+.action-fab {
+  position: relative;
+  --glass-widget-bg: rgba(30, 30, 34, 0.85);
+  margin-top: calc(14px * var(--ui-scale, 1));
+  height: calc(62px * var(--ui-scale, 1));
+  padding: 0 calc(27px * var(--ui-scale, 1)) 0 calc(17px * var(--ui-scale, 1));
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: calc(17px * var(--ui-scale, 1));
+  font-family: 'PingFang HK', 'PingFang SC', 'Segoe UI', sans-serif;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  z-index: 9;
+}
+
+.action-fab__icon {
+  width: calc(32px * var(--ui-scale, 1));
+  height: calc(32px * var(--ui-scale, 1));
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.action-fab__icon svg {
+  width: calc(18px * var(--ui-scale, 1));
+  height: calc(18px * var(--ui-scale, 1));
+  display: block;
+}
+
+.action-fab__label {
+  letter-spacing: 0.2px;
+  white-space: nowrap;
 }
 
 /* time wheel picker */

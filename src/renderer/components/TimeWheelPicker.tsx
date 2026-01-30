@@ -4,6 +4,7 @@ const ITEM_HEIGHT = 44;
 const VIEW_HEIGHT = 160;
 const COLUMN_WIDTH = 56;
 const LOOP_REPEAT = 18;
+const WHEEL_COOLDOWN = 100;
 
 const buildRange = (count: number) => Array.from({ length: count }, (_, i) => i);
 const DIGITS_0_9 = buildRange(10);
@@ -22,6 +23,7 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
   const animRef = useRef<number | null>(null);
   const activeIndexRef = useRef<number>(0);
   const lastValueRef = useRef<number>(value);
+  const lastWheelRef = useRef<number>(0);
   const padding = (VIEW_HEIGHT - ITEM_HEIGHT) / 2;
   const list = useMemo(() => {
     const total = values.length * LOOP_REPEAT;
@@ -71,21 +73,14 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
     smoothScrollTo(node, targetTop);
   };
 
-  const handleWheel: React.WheelEventHandler<HTMLDivElement> = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const applyStep = (direction: 1 | -1) => {
     const node = columnRef.current;
     if (!node) return;
-    const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
-    if (delta === 0) return;
-    const direction = delta > 0 ? 1 : -1;
-    const nextIndex = activeIndexRef.current + direction;
-    const valueIndex = ((nextIndex % values.length) + values.length) % values.length;
-    const recenteredIndex = baseIndex + valueIndex;
-    const targetIndex = nextIndex < values.length || nextIndex > values.length * (LOOP_REPEAT - 1)
-      ? recenteredIndex
-      : nextIndex;
-    const nextValue = values[valueIndex];
+    const currentValueIndex = values.indexOf(lastValueRef.current);
+    const safeIndex = currentValueIndex >= 0 ? currentValueIndex : 0;
+    const nextValueIndex = (safeIndex + direction + values.length) % values.length;
+    const targetIndex = baseIndex + nextValueIndex;
+    const nextValue = values[nextValueIndex];
     activeIndexRef.current = targetIndex;
     setActiveIndex(targetIndex);
     if (nextValue !== lastValueRef.current) {
@@ -112,7 +107,22 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
   }, [value, values, baseIndex]);
 
   useEffect(() => {
+    const node = columnRef.current;
+    if (!node) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const now = Date.now();
+      if (now - lastWheelRef.current < WHEEL_COOLDOWN) return;
+      lastWheelRef.current = now;
+      const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      if (delta === 0) return;
+      const direction: 1 | -1 = delta > 0 ? 1 : -1;
+      applyStep(direction);
+    };
+    node.addEventListener('wheel', handleWheel, { passive: false });
     return () => {
+      node.removeEventListener('wheel', handleWheel);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (animRef.current) cancelAnimationFrame(animRef.current);
     };
@@ -150,7 +160,6 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
         paddingTop: padding,
         paddingBottom: padding,
       }}
-      onWheel={handleWheel}
       onScroll={handleScroll}
       onMouseUp={snapToNearest}
       onTouchEnd={snapToNearest}

@@ -16,7 +16,7 @@ type UiScaleFrameProps = {
 const DESIGN_WIDTH = 985.766;
 const DESIGN_HEIGHT = 554.493;
 const ASPECT_RATIO = DESIGN_WIDTH / DESIGN_HEIGHT;
-const MIN_WIDTH = 380;
+const MIN_WIDTH = 440;
 const MAX_WIDTH = 1600;
 const MIN_HEIGHT = Math.round(MIN_WIDTH / ASPECT_RATIO);
 const MAX_HEIGHT = Math.round(MAX_WIDTH / ASPECT_RATIO);
@@ -90,6 +90,7 @@ const UiScaleFrame: React.FC<UiScaleFrameProps> = ({ children }) => {
       const { width, height } = frameRef.current.getBoundingClientRect();
       const scale = Math.min(width / DESIGN_WIDTH, height / DESIGN_HEIGHT);
       frameRef.current.style.setProperty('--ui-scale', String(scale));
+      frameRef.current.parentElement?.style.setProperty('--ui-scale', String(scale));
     };
 
     updateScale();
