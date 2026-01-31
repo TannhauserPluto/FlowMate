@@ -1747,6 +1747,11 @@ body {
   -ms-overflow-style: none;
 }
 
+.time-wheel--locked .time-wheel-column {
+  pointer-events: none;
+  overflow: hidden;
+}
+
 .time-wheel-column::-webkit-scrollbar {
   width: 0;
   height: 0;

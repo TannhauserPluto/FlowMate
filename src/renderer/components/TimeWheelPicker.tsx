@@ -288,7 +288,7 @@ const TimeWheelPicker: React.FC<TimeWheelPickerProps> = ({
 
   return (
     <div
-      className={`time-wheel flex items-center justify-center ${className ?? ''}`}
+      className={`time-wheel flex items-center justify-center ${!interactive ? 'time-wheel--locked' : ''} ${className ?? ''}`}
       style={styleVars}
       role="group"
       aria-label="Time picker"

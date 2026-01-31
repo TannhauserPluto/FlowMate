@@ -66,6 +66,7 @@ const App: React.FC = () => {
   const isTaskRunning = primaryView === 'task';
   const isFocusView = primaryView === 'focus';
   const isTimerView = primaryView === 'timer' || isFocusView;
+  const [isFocusRunning, setIsFocusRunning] = useState(false);
   const [timerValue, setTimerValue] = useState<TimeWheelValue>({
     hour: 0,
     minuteTens: 2,
@@ -109,6 +110,12 @@ const App: React.FC = () => {
   };
 
   const handleStartFocus = () => {
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setRemainingSeconds(toTotalSeconds(timerValue));
+    setIsFocusRunning(true);
     setCurrentView('focus');
   };
 
@@ -164,15 +171,9 @@ const App: React.FC = () => {
   }, [isTaskRunning]);
 
   useEffect(() => {
-    if (currentView !== 'focus') {
-      if (countdownRef.current) {
-        window.clearInterval(countdownRef.current);
-        countdownRef.current = null;
-      }
-      return;
-    }
+    if (!isFocusRunning) return;
+    if (countdownRef.current) return;
 
-    setRemainingSeconds(toTotalSeconds(timerValue));
     countdownRef.current = window.setInterval(() => {
       setRemainingSeconds((prev) => {
         if (prev <= 1) {
@@ -180,6 +181,7 @@ const App: React.FC = () => {
             window.clearInterval(countdownRef.current);
             countdownRef.current = null;
           }
+          setIsFocusRunning(false);
           return 0;
         }
         return prev - 1;
@@ -192,7 +194,7 @@ const App: React.FC = () => {
         countdownRef.current = null;
       }
     };
-  }, [currentView, timerValue]);
+  }, [isFocusRunning]);
 
   const markTodoDone = (id: string) => {
     if (transitioning[id]) return;
