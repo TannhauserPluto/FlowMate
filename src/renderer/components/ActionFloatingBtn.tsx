@@ -1,7 +1,7 @@
 import React from 'react';
 
 type ActionFloatingBtnProps = {
-  currentView: 'home' | 'task';
+  currentView: 'home' | 'task' | 'timer' | 'focus';
   onGoToTimerConfig: () => void;
   onStartWork: () => void;
 };

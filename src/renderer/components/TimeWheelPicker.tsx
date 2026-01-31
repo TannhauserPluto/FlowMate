@@ -11,9 +11,10 @@ import imgDigit8 from '../assets/digits/8.png';
 import imgDigit9 from '../assets/digits/9.png';
 import imgColon from '../assets/digits/：.png';
 
-const ITEM_HEIGHT = 32;
-const VIEW_HEIGHT = 160;
-const COLUMN_WIDTH = 56;
+const DEFAULT_ITEM_HEIGHT = 32;
+const DEFAULT_VIEW_HEIGHT = 160;
+const DEFAULT_COLUMN_WIDTH = 56;
+const DEFAULT_SEPARATOR_HEIGHT = 48;
 const LOOP_REPEAT = 18;
 const WHEEL_COOLDOWN = 100;
 
@@ -33,21 +34,50 @@ const DIGIT_IMAGES = [
   imgDigit9,
 ];
 
+export type TimeWheelValue = {
+  hour: number;
+  minuteTens: number;
+  minuteOnes: number;
+  secondTens: number;
+  secondOnes: number;
+};
+
+type TimeWheelSize = {
+  itemHeight?: number;
+  viewHeight?: number;
+  columnWidth?: number;
+  separatorHeight?: number;
+};
+
 type WheelColumnProps = {
   label: string;
   values: number[];
   value: number;
-  onChange: (next: number) => void;
+  itemHeight: number;
+  viewHeight: number;
+  columnWidth: number;
+  interactive: boolean;
+  animate: boolean;
+  onChange?: (next: number) => void;
 };
 
-const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChange }) => {
+const WheelColumn: React.FC<WheelColumnProps> = ({
+  label,
+  values,
+  value,
+  itemHeight,
+  viewHeight,
+  columnWidth,
+  interactive,
+  animate,
+  onChange,
+}) => {
   const columnRef = useRef<HTMLDivElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const animRef = useRef<number | null>(null);
   const activeIndexRef = useRef<number>(0);
   const lastValueRef = useRef<number>(value);
   const lastWheelRef = useRef<number>(0);
-  const padding = (VIEW_HEIGHT - ITEM_HEIGHT) / 2;
   const list = useMemo(() => {
     const total = values.length * LOOP_REPEAT;
     return Array.from({ length: total }, (_, i) => values[i % values.length]);
@@ -61,21 +91,21 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
   const syncFromScroll = () => {
     const node = columnRef.current;
     if (!node) return;
-    const index = Math.round(node.scrollTop / ITEM_HEIGHT);
+    const index = Math.round(node.scrollTop / itemHeight);
     const valueIndex = ((index % values.length) + values.length) % values.length;
     const nextValue = values[valueIndex];
     const total = values.length * LOOP_REPEAT;
     const recenterThreshold = values.length * 2;
     if (index < recenterThreshold || index > total - recenterThreshold) {
       const recenteredIndex = baseIndex + valueIndex;
-      node.scrollTop = recenteredIndex * ITEM_HEIGHT;
+      node.scrollTop = recenteredIndex * itemHeight;
       activeIndexRef.current = recenteredIndex;
       setActiveIndex(recenteredIndex);
     } else {
       activeIndexRef.current = index;
       setActiveIndex(index);
     }
-    if (nextValue !== lastValueRef.current) {
+    if (onChange && nextValue !== lastValueRef.current) {
       lastValueRef.current = nextValue;
       onChange(nextValue);
     }
@@ -91,8 +121,8 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
   const snapToNearest = () => {
     const node = columnRef.current;
     if (!node) return;
-    const index = Math.round(node.scrollTop / ITEM_HEIGHT);
-    const targetTop = index * ITEM_HEIGHT;
+    const index = Math.round(node.scrollTop / itemHeight);
+    const targetTop = index * itemHeight;
     smoothScrollTo(node, targetTop);
   };
 
@@ -106,11 +136,11 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
     const nextValue = values[nextValueIndex];
     activeIndexRef.current = targetIndex;
     setActiveIndex(targetIndex);
-    if (nextValue !== lastValueRef.current) {
+    if (onChange && nextValue !== lastValueRef.current) {
       lastValueRef.current = nextValue;
       onChange(nextValue);
     }
-    const targetTop = targetIndex * ITEM_HEIGHT;
+    const targetTop = targetIndex * itemHeight;
     smoothScrollTo(node, targetTop);
   };
 
@@ -123,15 +153,19 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
     lastValueRef.current = value;
     activeIndexRef.current = targetIndex;
     setActiveIndex(targetIndex);
-    const targetTop = targetIndex * ITEM_HEIGHT;
+    const targetTop = targetIndex * itemHeight;
     if (Math.abs(node.scrollTop - targetTop) > 1) {
-      node.scrollTo({ top: targetTop, behavior: 'auto' });
+      if (animate) {
+        smoothScrollTo(node, targetTop);
+      } else {
+        node.scrollTo({ top: targetTop, behavior: 'auto' });
+      }
     }
-  }, [value, values, baseIndex]);
+  }, [value, values, baseIndex, itemHeight, animate]);
 
   useEffect(() => {
     const node = columnRef.current;
-    if (!node) return;
+    if (!node || !interactive) return;
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
       event.stopPropagation();
@@ -149,7 +183,7 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (animRef.current) cancelAnimationFrame(animRef.current);
     };
-  }, []);
+  }, [interactive, applyStep]);
 
   const smoothScrollTo = (node: HTMLDivElement, targetTop: number) => {
     if (animRef.current) {
@@ -178,15 +212,13 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
       ref={columnRef}
       className="time-wheel-column snap-y snap-mandatory"
       style={{
-        height: VIEW_HEIGHT,
-        width: COLUMN_WIDTH,
-        paddingTop: padding,
-        paddingBottom: padding,
+        height: viewHeight,
+        width: columnWidth,
       }}
-      onScroll={handleScroll}
-      onMouseUp={snapToNearest}
-      onTouchEnd={snapToNearest}
-      onPointerUp={snapToNearest}
+      onScroll={interactive ? handleScroll : undefined}
+      onMouseUp={interactive ? snapToNearest : undefined}
+      onTouchEnd={interactive ? snapToNearest : undefined}
+      onPointerUp={interactive ? snapToNearest : undefined}
       aria-label={label}
       role="listbox"
     >
@@ -196,7 +228,6 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
           <div
             key={`${label}-${index}`}
             className={`time-wheel-item snap-center ${isActive ? 'is-active' : ''}`}
-            style={{ height: ITEM_HEIGHT }}
             aria-selected={isActive}
             role="option"
           >
@@ -208,23 +239,118 @@ const WheelColumn: React.FC<WheelColumnProps> = ({ label, values, value, onChang
   );
 };
 
-const TimeWheelPicker: React.FC = () => {
-  const [hour, setHour] = useState(0);
-  const [minuteTens, setMinuteTens] = useState(2);
-  const [minuteOnes, setMinuteOnes] = useState(5);
-  const [secondTens, setSecondTens] = useState(0);
-  const [secondOnes, setSecondOnes] = useState(0);
+type TimeWheelPickerProps = {
+  value?: TimeWheelValue;
+  onChange?: (next: TimeWheelValue) => void;
+  interactive?: boolean;
+  animate?: boolean;
+  size?: TimeWheelSize;
+  className?: string;
+};
+
+const TimeWheelPicker: React.FC<TimeWheelPickerProps> = ({
+  value,
+  onChange,
+  interactive = true,
+  animate = false,
+  size,
+  className,
+}) => {
+  const [internalValue, setInternalValue] = useState<TimeWheelValue>(
+    value ?? { hour: 0, minuteTens: 2, minuteOnes: 5, secondTens: 0, secondOnes: 0 },
+  );
+  const currentValue = value ?? internalValue;
+  const viewHeight = size?.viewHeight ?? DEFAULT_VIEW_HEIGHT;
+  const itemHeight = size?.itemHeight ?? DEFAULT_ITEM_HEIGHT;
+  const columnWidth = size?.columnWidth ?? DEFAULT_COLUMN_WIDTH;
+  const separatorHeight = size?.separatorHeight ?? DEFAULT_SEPARATOR_HEIGHT;
+  const styleVars = {
+    '--wheel-height': `${viewHeight}px`,
+    '--item-height': `${itemHeight}px`,
+    '--separator-height': `${separatorHeight}px`,
+    '--column-width': `${columnWidth}px`,
+  } as React.CSSProperties;
+
+  useEffect(() => {
+    if (value) {
+      setInternalValue(value);
+    }
+  }, [value]);
+
+  const updateValue = (patch: Partial<TimeWheelValue>) => {
+    const nextValue = { ...currentValue, ...patch };
+    if (onChange) {
+      onChange(nextValue);
+    } else if (!value) {
+      setInternalValue(nextValue);
+    }
+  };
 
   return (
-    <div className="time-wheel flex items-center justify-center" role="group" aria-label="Time picker">
+    <div
+      className={`time-wheel flex items-center justify-center ${className ?? ''}`}
+      style={styleVars}
+      role="group"
+      aria-label="Time picker"
+    >
       <div className="time-wheel-row flex items-center">
-        <WheelColumn label="Hours" values={DIGITS_0_5} value={hour} onChange={setHour} />
+        <WheelColumn
+          label="Hours"
+          values={DIGITS_0_5}
+          value={currentValue.hour}
+          itemHeight={itemHeight}
+          viewHeight={viewHeight}
+          columnWidth={columnWidth}
+          interactive={interactive}
+          animate={animate}
+          onChange={(next) => updateValue({ hour: next })}
+        />
         <img className="time-wheel-separator" src={imgColon} alt=":" />
-        <WheelColumn label="Minutes tens" values={DIGITS_0_5} value={minuteTens} onChange={setMinuteTens} />
-        <WheelColumn label="Minutes ones" values={DIGITS_0_9} value={minuteOnes} onChange={setMinuteOnes} />
+        <WheelColumn
+          label="Minutes tens"
+          values={DIGITS_0_5}
+          value={currentValue.minuteTens}
+          itemHeight={itemHeight}
+          viewHeight={viewHeight}
+          columnWidth={columnWidth}
+          interactive={interactive}
+          animate={animate}
+          onChange={(next) => updateValue({ minuteTens: next })}
+        />
+        <WheelColumn
+          label="Minutes ones"
+          values={DIGITS_0_9}
+          value={currentValue.minuteOnes}
+          itemHeight={itemHeight}
+          viewHeight={viewHeight}
+          columnWidth={columnWidth}
+          interactive={interactive}
+          animate={animate}
+          onChange={(next) => updateValue({ minuteOnes: next })}
+        />
         <img className="time-wheel-separator" src={imgColon} alt=":" />
-        <WheelColumn label="Seconds tens" values={DIGITS_0_5} value={secondTens} onChange={setSecondTens} />
-        <WheelColumn label="Seconds ones" values={DIGITS_0_9} value={secondOnes} onChange={setSecondOnes} />
+        <WheelColumn
+          label="Seconds tens"
+          values={DIGITS_0_5}
+          value={currentValue.secondTens}
+          itemHeight={itemHeight}
+          viewHeight={viewHeight}
+          columnWidth={columnWidth}
+          interactive={interactive}
+          animate={animate}
+          onChange={(next) => updateValue({ secondTens: next })}
+        />
+        <WheelColumn
+          label="Seconds ones"
+          values={DIGITS_0_9}
+          value={currentValue.secondOnes}
+          itemHeight={itemHeight}
+          viewHeight={viewHeight}
+          columnWidth={columnWidth}
+          interactive={interactive}
+          animate={animate}
+          onChange={(next) => updateValue({ secondOnes: next })}
+        />
       </div>
     </div>
   );

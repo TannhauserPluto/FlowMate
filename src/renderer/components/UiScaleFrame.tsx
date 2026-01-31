@@ -174,26 +174,29 @@ const UiScaleFrame: React.FC<UiScaleFrameProps> = ({ children }) => {
   }, []);
 
   return (
-    <div ref={frameRef} className="app-frame" data-name="Base" data-node-id="240:214">
-      <div className="glass-border" aria-hidden="true">
+    <div ref={frameRef} className="app-frame-shell">
+      <div className="app-frame-backdrop" aria-hidden="true" />
+      <div className="app-frame" data-name="Base" data-node-id="240:214">
+        <div className="glass-border" aria-hidden="true">
         <span className="border-edge border-top" />
         <span className="border-edge border-right" />
         <span className="border-edge border-bottom" />
         <span className="border-edge border-left" />
         <span className="border-corner border-corner-top-left" />
-      </div>
-      <div className="app-container">
-        <div className="ui-scale">{children}</div>
-      </div>
-      <div className="resize-overlay">
-        <div className="resize-handle handle-top" data-resize-handle="top" />
-        <div className="resize-handle handle-right" data-resize-handle="right" />
-        <div className="resize-handle handle-bottom" data-resize-handle="bottom" />
-        <div className="resize-handle handle-left" data-resize-handle="left" />
-        <div className="resize-handle handle-top-left" data-resize-handle="top-left" />
-        <div className="resize-handle handle-top-right" data-resize-handle="top-right" />
-        <div className="resize-handle handle-bottom-left" data-resize-handle="bottom-left" />
-        <div className="resize-handle handle-bottom-right" data-resize-handle="bottom-right" />
+        </div>
+        <div className="app-container">
+          <div className="ui-scale">{children}</div>
+        </div>
+        <div className="resize-overlay">
+          <div className="resize-handle handle-top" data-resize-handle="top" />
+          <div className="resize-handle handle-right" data-resize-handle="right" />
+          <div className="resize-handle handle-bottom" data-resize-handle="bottom" />
+          <div className="resize-handle handle-left" data-resize-handle="left" />
+          <div className="resize-handle handle-top-left" data-resize-handle="top-left" />
+          <div className="resize-handle handle-top-right" data-resize-handle="top-right" />
+          <div className="resize-handle handle-bottom-left" data-resize-handle="bottom-left" />
+          <div className="resize-handle handle-bottom-right" data-resize-handle="bottom-right" />
+        </div>
       </div>
     </div>
   );
