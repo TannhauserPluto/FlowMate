@@ -119,6 +119,25 @@ const App: React.FC = () => {
     setCurrentView('focus');
   };
 
+  const handlePauseFocus = () => {
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+      setIsFocusRunning(false);
+    } else if (remainingSeconds > 0) {
+      setIsFocusRunning(true);
+    }
+  };
+
+  const handleEndFocus = () => {
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setIsFocusRunning(false);
+    setCurrentView('timer');
+  };
+
   const handleWindowMinimize = () => {
     (window as any).electron?.invoke('window:minimize').catch(() => {});
   };
@@ -466,7 +485,7 @@ const App: React.FC = () => {
                         onChange={isFocusView ? undefined : setTimerValue}
                         interactive={!isFocusView}
                         animate={isFocusView}
-                        size={TIMER_WHEEL_SIZE}
+                        size={isFocusView ? TIMER_WHEEL_SIZE : undefined}
                       />
                     </div>
                   ) : (
@@ -589,6 +608,9 @@ const App: React.FC = () => {
           currentView={primaryView}
           onGoToTimerConfig={handleGoToTimerConfig}
           onStartWork={handleStartFocus}
+          onPause={handlePauseFocus}
+          onEnd={handleEndFocus}
+          isFocusRunning={isFocusRunning}
         />
       </div>
     </div>

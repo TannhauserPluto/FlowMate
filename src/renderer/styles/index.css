@@ -258,6 +258,7 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 10;
 }
 
 .resize-handle {
@@ -265,6 +266,7 @@ body {
   pointer-events: auto;
   -webkit-app-region: no-drag;
   background: transparent;
+  z-index: 11;
 }
 
 .resize-handle:hover {
@@ -1643,6 +1645,18 @@ body {
   transition: opacity 220ms ease, transform 220ms ease;
 }
 
+.action-fab-group {
+  margin-top: calc(14px * var(--ui-scale, 1));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(28px * var(--ui-scale, 1));
+}
+
+.action-fab-group .action-fab {
+  margin-top: 0;
+}
+
 .action-fab__icon {
   width: calc(32px * var(--ui-scale, 1));
   height: calc(32px * var(--ui-scale, 1));
@@ -1679,8 +1693,9 @@ body {
 .timer-countdown {
   position: absolute;
   left: 50%;
-  top: 120px;
-  transform: translateX(-50%);
+  top: 55px;
+  transform: translateX(-50%) translateY(8px);
+  opacity: 1;
   z-index: 6;
   pointer-events: auto;
   -webkit-app-region: no-drag;

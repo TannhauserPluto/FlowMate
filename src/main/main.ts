@@ -94,9 +94,9 @@ function createWindow(): void {
 
 function resolveTrayIconPath(): string | null {
   const candidates = [
-    path.join(app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
-    path.join(app.getAppPath(), 'dist', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
-    path.join(__dirname, '../renderer/assets/figma/nav-avatar.png'),
+    path.join(app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'logo.png'),
+    path.join(app.getAppPath(), 'dist', 'renderer', 'assets', 'figma', 'logo.png'),
+    path.join(__dirname, '../renderer/assets/figma/logo.png'),
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) return candidate;

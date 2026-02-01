@@ -125,9 +125,9 @@ function createWindow() {
 }
 function resolveTrayIconPath() {
     const candidates = [
-        path.join(electron_1.app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
-        path.join(electron_1.app.getAppPath(), 'dist', 'renderer', 'assets', 'figma', 'nav-avatar.png'),
-        path.join(__dirname, '../renderer/assets/figma/nav-avatar.png'),
+        path.join(electron_1.app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'logo.png'),
+        path.join(electron_1.app.getAppPath(), 'dist', 'renderer', 'assets', 'figma', 'logo.png'),
+        path.join(__dirname, '../renderer/assets/figma/logo.png'),
     ];
     for (const candidate of candidates) {
         if (fs.existsSync(candidate))

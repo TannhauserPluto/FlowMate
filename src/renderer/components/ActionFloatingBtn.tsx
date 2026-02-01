@@ -4,16 +4,73 @@ type ActionFloatingBtnProps = {
   currentView: 'home' | 'task' | 'timer' | 'focus';
   onGoToTimerConfig: () => void;
   onStartWork: () => void;
+  onPause: () => void;
+  onEnd: () => void;
+  isFocusRunning: boolean;
 };
 
 const ActionFloatingBtn: React.FC<ActionFloatingBtnProps> = ({
   currentView,
   onGoToTimerConfig,
   onStartWork,
+  onPause,
+  onEnd,
+  isFocusRunning,
 }) => {
   const isHome = currentView === 'home';
+  const isFocus = currentView === 'focus';
   const label = isHome ? '番茄钟' : '开始工作';
   const handleClick = isHome ? onGoToTimerConfig : onStartWork;
+
+  if (isFocus) {
+    const pauseLabel = isFocusRunning ? '暂停' : '继续';
+    return (
+      <div className="action-fab-group" role="group" aria-label="Focus controls">
+        <button
+          type="button"
+          className="action-fab glass-widget glass-widget--border glass-widget-surface"
+          onClick={onPause}
+          aria-label={pauseLabel}
+        >
+          <span className="action-fab__icon" aria-hidden="true">
+            {isFocusRunning ? (
+              <svg viewBox="0 0 24 24" role="presentation">
+                <rect x="6.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor" />
+                <rect x="13.5" y="5.5" width="4" height="13" rx="1.2" fill="currentColor" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" role="presentation">
+                <path
+                  d="M7.5 5.5l11 6.5-11 6.5V5.5z"
+                  fill="currentColor"
+                />
+              </svg>
+            )}
+          </span>
+          <span className="action-fab__label">{pauseLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="action-fab glass-widget glass-widget--border glass-widget-surface"
+          onClick={onEnd}
+          aria-label="结束"
+        >
+          <span className="action-fab__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="presentation">
+              <path
+                d="M12 4.5l2.35 4.76 5.26.77-3.8 3.7.9 5.24L12 16.8l-4.71 2.47.9-5.24-3.8-3.7 5.26-.77L12 4.5z"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <span className="action-fab__label">结束</span>
+        </button>
+      </div>
+    );
+  }
 
   return (
     <button
