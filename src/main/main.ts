@@ -9,6 +9,8 @@ let isQuitting = false;
 
 const isDev = !app.isPackaged;
 
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 function createWindow(): void {
   const aspectRatio = 985.766 / 554.493;
   const baseWidth = 986;
@@ -86,6 +88,14 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[renderer] process gone', details);
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    console.error('[renderer] unresponsive');
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;

@@ -1444,6 +1444,11 @@ body {
   align-items: flex-start;
 }
 
+/* prevent todo card and chat history from shrinking when new messages append */
+.window.is-task-running .task-scroll > * {
+  flex: 0 0 auto;
+}
+
 /* chat bubbles use the same glass treatment as the input */
 .window.is-task-running .chat-bubble-glass {
   border-radius: 30.21px;
@@ -1526,6 +1531,7 @@ body {
   align-items: stretch;
   position: relative;
   overflow: visible;
+  flex: 0 0 auto;
 }
 
 .window.is-task-running .todo-meta {
@@ -1622,6 +1628,39 @@ body {
 
 .window.is-task-running .todo-item.is-done .todo-check-circle {
   background: rgba(255, 255, 255, 0.9);
+}
+
+.window.is-task-running .task-history {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  align-items: flex-end;
+  flex: 0 0 auto;
+}
+
+.window.is-task-running .task-history-item {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.88);
+  padding: 0;
+  border-radius: 0;
+  max-width: 360px;
+  background: transparent;
+}
+
+.window.is-task-running .task-history-item.is-user {
+  align-self: flex-end;
+  color: rgba(255, 255, 255, 0.92);
+  text-align: right;
+  padding: 8px 14px;
+  border-radius: 20px;
+}
+
+.window.is-task-running .task-history-item.is-assistant {
+  align-self: flex-start;
+  color: rgba(255, 255, 255, 0.78);
 }
 
 /* floating action button */

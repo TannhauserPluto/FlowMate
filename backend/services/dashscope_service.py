@@ -199,6 +199,20 @@ class DashScopeService:
         ]
         if any(keyword in text_lower for keyword in breakdown_keywords):
             return "breakdown"
+        extra_breakdown_keywords = [
+            "准备",
+            "复习",
+            "考试",
+            "面试",
+            "计划",
+            "任务",
+            "论文",
+            "作业",
+            "项目",
+            "雅思",
+        ]
+        if any(keyword in text_lower for keyword in extra_breakdown_keywords):
+            return "breakdown"
         return "chat"
 
     def summarize_breakdown(self, task: str, steps: List[str]) -> str:

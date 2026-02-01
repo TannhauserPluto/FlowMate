@@ -28,6 +28,12 @@ type TodoItem = {
   text: string;
 };
 
+type TaskMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+};
+
 const STAR_LEVELS = '32234312210322320'.split('').map((value) => Number.parseInt(value, 10));
 const STAR_LEVEL_IMAGES = [starLv0, starLv1, starLv2, starLv3, starLv4];
 const TIMER_WHEEL_SIZE = {
@@ -35,6 +41,36 @@ const TIMER_WHEEL_SIZE = {
   itemHeight: 116,
   columnWidth: 46,
   separatorHeight: 56,
+};
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
+const sanitizeText = (text: string) =>
+  text
+    .replace(/<\|.*?\|>/g, '')
+    .replace(/<Speech\|>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const getBeijingDate = () =>
+  new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).format(new Date());
+
+const summarizeTopic = (userText: string, tasks: string[]) => {
+  const combined = `${userText} ${tasks.join(' ')}`;
+  const has = (keyword: string) => combined.includes(keyword);
+  if (has('雅思') && has('听力')) return '雅思听力复习';
+  if (has('雅思') && has('口语')) return '雅思口语练习';
+  if (has('雅思') && has('阅读')) return '雅思阅读复习';
+  if (has('雅思')) return '雅思复习';
+  if (has('论文')) return '论文任务';
+  if (has('考研')) return '考研复习';
+  if (has('项目')) return '项目任务';
+  const fallback = sanitizeText(userText || tasks[0] || '任务');
+  if (!fallback) return '任务';
+  return fallback.length > 8 ? `${fallback.slice(0, 8)}...` : fallback;
 };
 
 const toTotalSeconds = (value: TimeWheelValue) =>
@@ -61,11 +97,20 @@ const toTimeWheelValue = (totalSeconds: number): TimeWheelValue => {
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<View>('home');
   const [profileTab, setProfileTab] = useState<ProfileTab>('day');
+  const [encouragement, setEncouragement] = useState('让我来拆解你的任务吧～');
+  const [chatUserText, setChatUserText] = useState('我需要写一篇关于数字媒体交互的论文');
+  const [chatAssistantText, setChatAssistantText] = useState(
+    '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list',
+  );
+  const [taskTitle, setTaskTitle] = useState('数字媒体论文');
+  const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
+  const [isInitialTaskLocked, setIsInitialTaskLocked] = useState(false);
   const returnViewRef = useRef<PrimaryView>('home');
   const primaryView: PrimaryView = currentView === 'profile' ? returnViewRef.current : currentView;
   const isTaskRunning = primaryView === 'task';
   const isFocusView = primaryView === 'focus';
   const isTimerView = primaryView === 'timer' || isFocusView;
+  const isHomeView = primaryView === 'home';
   const [isFocusRunning, setIsFocusRunning] = useState(false);
   const [timerValue, setTimerValue] = useState<TimeWheelValue>({
     hour: 0,
@@ -76,6 +121,14 @@ const App: React.FC = () => {
   });
   const [remainingSeconds, setRemainingSeconds] = useState(() => toTotalSeconds(timerValue));
   const countdownRef = useRef<number | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isGeneratingTasks, setIsGeneratingTasks] = useState(false);
+  const recordingHandlerRef = useRef<((blob: Blob) => Promise<void> | void) | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef<string | null>(null);
 
   const [todoItems, setTodoItems] = useState<TodoItem[]>([
     { id: 'todo-1', text: '明确论文基本信息' },
@@ -91,10 +144,6 @@ const App: React.FC = () => {
   const todoPositions = useRef(new Map<string, DOMRect>());
   const donePositions = useRef(new Map<string, DOMRect>());
 
-  const activateTaskRunning = () => {
-    if (currentView !== 'task') setCurrentView('task');
-  };
-
   const toggleProfilePanel = () => {
     if (currentView === 'profile') {
       setCurrentView(returnViewRef.current);
@@ -109,7 +158,14 @@ const App: React.FC = () => {
     setCurrentView('timer');
   };
 
-  const handleStartFocus = () => {
+  const handleStartFocus = async () => {
+    if (primaryView === 'task') {
+      try {
+        await fetch(`${API_BASE}/api/brain/audit/reset`, { method: 'POST' });
+      } catch {
+        // ignore audit reset failure
+      }
+    }
     if (countdownRef.current) {
       window.clearInterval(countdownRef.current);
       countdownRef.current = null;
@@ -144,6 +200,280 @@ const App: React.FC = () => {
 
   const handleWindowClose = () => {
     (window as any).electron?.invoke('window:close').catch(() => {});
+  };
+
+  const ensureAudioPlayer = () => {
+    if (!audioPlayerRef.current) {
+      audioPlayerRef.current = new Audio();
+      audioPlayerRef.current.preload = 'auto';
+      audioPlayerRef.current.volume = 1;
+    }
+    return audioPlayerRef.current;
+  };
+
+  const playAudioFromBase64 = async (base64?: string, format?: string) => {
+    if (!base64) return;
+    const mime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+    const audio = ensureAudioPlayer();
+    const dataUrl = `data:${mime};base64,${base64}`;
+    audio.pause();
+    audio.currentTime = 0;
+    audio.src = dataUrl;
+    try {
+      await audio.play();
+    } catch (error) {
+      console.warn('[audio] HTMLAudio (data URL) play failed', error);
+    }
+  };
+
+  const playAudioFromUrl = async (url?: string) => {
+    if (!url) return;
+    const audio = ensureAudioPlayer();
+    const src = url.startsWith('http') ? url : `${API_BASE}${url}`;
+    audio.src = src;
+    try {
+      await audio.play();
+    } catch (error) {
+      console.warn('[audio] URL play failed', error);
+    }
+  };
+
+  const generateTasks = async (description: string) => {
+    if (!description.trim()) return;
+    setIsGeneratingTasks(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/interaction/generate-tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_description: description }),
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      const tasks: string[] = data?.tasks ?? [];
+      const baseId = Date.now();
+      setTaskTitle(summarizeTopic(description, tasks));
+      setTodoItems(tasks.map((text, index) => ({ id: `todo-${baseId}-${index}`, text })));
+      setDoneItems([]);
+    } finally {
+      setIsGeneratingTasks(false);
+    }
+  };
+
+  const sendChatMessage = async (message: string) => {
+    const response = await fetch(`${API_BASE}/api/interaction/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data?.reply) {
+      const reply = sanitizeText(data.reply);
+      if (!isInitialTaskLocked) {
+        setChatAssistantText(reply);
+        setIsInitialTaskLocked(true);
+      }
+      setTaskMessages((prev) => [
+        ...prev,
+        { id: `task-msg-${Date.now()}-assistant`, role: 'assistant', text: reply },
+      ]);
+    }
+    if (data?.audio_url) {
+      playAudioFromUrl(data.audio_url);
+    } else if (data?.reply) {
+      try {
+        const speakResponse = await fetch(`${API_BASE}/api/interaction/speak`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: data.reply, emotion: 'neutral' }),
+        });
+        if (!speakResponse.ok) return;
+        const payload = await speakResponse.json();
+        playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+      } catch {
+        // ignore fallback speech errors
+      }
+    }
+  };
+
+  const applyInteraction = async (interaction: any, userText?: string) => {
+    if (!interaction) return;
+    const cleanedUserText = userText ? sanitizeText(userText) : '';
+    if (!isInitialTaskLocked) {
+      if (userText) setChatUserText(cleanedUserText);
+      if (interaction.audio_text) setChatAssistantText(sanitizeText(interaction.audio_text));
+    }
+
+    if (interaction.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
+      try {
+        const key = 'flowmate.memos';
+        const prev = JSON.parse(window.localStorage.getItem(key) ?? '[]');
+        prev.push({
+          content: interaction.ui_payload.content,
+          created_at: new Date().toISOString(),
+        });
+        window.localStorage.setItem(key, JSON.stringify(prev));
+      } catch {
+        // ignore storage failures
+      }
+      return;
+    }
+
+    if (interaction.type === 'breakdown') {
+      if (cleanedUserText) {
+        setChatUserText(cleanedUserText);
+      }
+      if (interaction.audio_text) {
+        setChatAssistantText(sanitizeText(interaction.audio_text));
+      }
+      const title = interaction.ui_payload?.content?.title ?? cleanedUserText ?? '任务拆解';
+      setTaskTitle(title);
+      if (cleanedUserText) {
+        await generateTasks(cleanedUserText);
+      }
+      if (cleanedUserText) setIsInitialTaskLocked(true);
+      setCurrentView('task');
+    }
+  };
+
+  const sendTextIntent = async (text: string) => {
+    const response = await fetch(`${API_BASE}/api/interaction/intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      throw new Error('Intent request failed');
+    }
+    const interaction = await response.json();
+    await applyInteraction(interaction, text);
+  };
+
+  const sendVoiceIntent = async (audioBlob: Blob) => {
+    const form = new FormData();
+    form.append('audio', audioBlob, 'voice.webm');
+    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) {
+      throw new Error('Voice request failed');
+    }
+    const payload = await response.json();
+    const interaction = payload?.data?.interaction;
+    const userText = payload?.data?.user?.text;
+    await applyInteraction(interaction, userText);
+    playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+  };
+
+  const handleHomeTextSubmit = async (text: string) => {
+    try {
+      await sendTextIntent(text);
+    } catch {
+      // ignore for now
+    }
+  };
+
+  const stopRecording = () => {
+    if (!mediaRecorderRef.current) return;
+    if (mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const startRecording = async (handler: (blob: Blob) => Promise<void> | void) => {
+    if (isRecording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recordingHandlerRef.current = handler;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = async () => {
+        const blob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        audioChunksRef.current = [];
+        stream.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        mediaRecorderRef.current = null;
+        setIsRecording(false);
+        if (blob.size > 0) {
+          const handlerRef = recordingHandlerRef.current;
+          recordingHandlerRef.current = null;
+          if (handlerRef) {
+            await handlerRef(blob);
+          }
+        }
+      };
+      recorder.start();
+      setIsRecording(true);
+    } catch {
+      setIsRecording(false);
+    }
+  };
+
+  const handleHomeAudioClick = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording(sendVoiceIntent);
+    }
+  };
+
+  const handleTaskInputSubmit = async (text: string) => {
+    const cleaned = sanitizeText(text);
+    setTaskMessages((prev) => [
+      ...prev,
+      { id: `task-msg-${Date.now()}`, role: 'user', text: cleaned },
+    ]);
+    await generateTasks(cleaned);
+    await sendChatMessage(cleaned);
+  };
+
+  const sendVoiceChat = async (audioBlob: Blob) => {
+    const form = new FormData();
+    form.append('audio', audioBlob, 'voice.webm');
+    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const userText = sanitizeText(payload?.data?.user?.text || '');
+    const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
+    if (userText) {
+      if (!isInitialTaskLocked) {
+        setChatUserText(userText);
+      }
+      setTaskMessages((prev) => [
+        ...prev,
+        { id: `task-msg-${Date.now()}-user`, role: 'user', text: userText },
+      ]);
+    }
+    if (assistantText) {
+      if (!isInitialTaskLocked) {
+        setChatAssistantText(assistantText);
+        setIsInitialTaskLocked(true);
+      }
+      setTaskMessages((prev) => [
+        ...prev,
+        { id: `task-msg-${Date.now()}-assistant`, role: 'assistant', text: assistantText },
+      ]);
+    }
+    playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+  };
+
+  const handleTaskAudioClick = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording(sendVoiceChat);
+    }
   };
 
   const animateList = (
@@ -188,6 +518,20 @@ const App: React.FC = () => {
       taskInputRef.current?.focus();
     }
   }, [isTaskRunning]);
+
+  useEffect(() => {
+    let mounted = true;
+    fetch(`${API_BASE}/api/interaction/encouragement`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (!mounted || !data?.encouragement) return;
+        setEncouragement(data.encouragement);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isFocusRunning) return;
@@ -491,14 +835,14 @@ const App: React.FC = () => {
                   ) : (
                     <>
                       <p className="headline" data-node-id="262:229">
-                        让我来拆解你的任务吧～
+                        {isHomeView ? encouragement : '让我来拆解你的任务吧～'}
                       </p>
                       <VoiceInput
                         placeholder="今天要完成什么呢？"
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
-                        onActivate={activateTaskRunning}
-                        onFocusCapture={activateTaskRunning}
+                        onSubmit={isHomeView ? handleHomeTextSubmit : undefined}
+                        onAudioClick={isHomeView ? handleHomeAudioClick : undefined}
                       />
                     </>
                   )}
@@ -515,17 +859,16 @@ const App: React.FC = () => {
                     <div className="task-scroll">
                       <div className="chat-block">
                         <div className="chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
-                          我需要写一篇关于数字媒体交互的论文
+                          {chatUserText}
                         </div>
                         <div className="chat-bubble chat-bubble-assistant">
-                          根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list
-                          <span className="chat-bubble-assistant-secondary">好的！已经充分了解！</span>
+                          {chatAssistantText}
                         </div>
                       </div>
                       <div className="todo-card">
                         <div className="todo-meta">
-                          <span className="todo-date">1/26/2026</span>
-                          <span className="todo-project">数字媒体论文</span>
+                          <span className="todo-date">{getBeijingDate()}</span>
+                          <span className="todo-project">{taskTitle}</span>
                         </div>
                         <div className="todo-title-row">TO DO</div>
                         <ul className="todo-list todo-list--todo">
@@ -589,6 +932,18 @@ const App: React.FC = () => {
                           })}
                         </ul>
                       </div>
+                      {taskMessages.length > 0 && (
+                        <div className="task-history">
+                          {taskMessages.map((message) => (
+                            <div
+                              key={message.id}
+                              className={`task-history-item ${message.role === 'user' ? 'is-user glass-widget glass-widget--border glass-widget-surface' : 'is-assistant'}`}
+                            >
+                              {message.text}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                     <div className="task-input">
                       <VoiceInput
@@ -596,6 +951,8 @@ const App: React.FC = () => {
                         placeholder="今天要完成什么呢？"
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
+                        onSubmit={handleTaskInputSubmit}
+                        onAudioClick={handleTaskAudioClick}
                       />
                     </div>
                   </div>

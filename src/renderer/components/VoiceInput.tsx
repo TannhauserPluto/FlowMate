@@ -6,16 +6,36 @@ type VoiceInputProps = {
   audioIcon: string;
   onActivate?: () => void;
   onFocusCapture?: () => void;
+  onSubmit?: (value: string) => void;
+  onAudioClick?: () => void;
 };
 
 const VoiceInput = forwardRef<HTMLInputElement, VoiceInputProps>(
-  ({ placeholder, plusIcon, audioIcon, onActivate, onFocusCapture }, ref) => {
+  ({ placeholder, plusIcon, audioIcon, onActivate, onFocusCapture, onSubmit, onAudioClick }, ref) => {
     const localRef = useRef<HTMLInputElement | null>(null);
     const inputRef = (ref as React.MutableRefObject<HTMLInputElement | null>) ?? localRef;
 
     const handleMouseDown = () => {
       if (onActivate) onActivate();
       inputRef.current?.focus();
+    };
+
+    const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== 'Enter' || !onSubmit) return;
+      const value = inputRef.current?.value?.trim() ?? '';
+      if (!value) return;
+      event.preventDefault();
+      onSubmit(value);
+      if (inputRef.current) {
+        inputRef.current.value = '';
+      }
+    };
+
+    const handleAudioClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+      if (!onAudioClick) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onAudioClick();
     };
 
     return (
@@ -32,8 +52,9 @@ const VoiceInput = forwardRef<HTMLInputElement, VoiceInputProps>(
           type="text"
           placeholder={placeholder}
           onFocus={onFocusCapture}
+          onKeyDown={handleKeyDown}
         />
-        <button className="voice-action" type="button" aria-label="Speak">
+        <button className="voice-action" type="button" aria-label="Speak" onClick={handleAudioClick}>
           <span className="voice-action-bg" aria-hidden="true" />
           <img src={audioIcon} alt="" />
         </button>

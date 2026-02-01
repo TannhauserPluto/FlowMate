@@ -11,6 +11,7 @@ from pathlib import Path
 
 from core import agent_brain, flow_manager
 from services import audio_service, voice_pipeline_service
+from services.interaction_service import process_user_intent
 
 router = APIRouter()
 
@@ -67,6 +68,12 @@ class ChatResponse(BaseModel):
     """Chat response."""
     reply: str
     audio_url: Optional[str] = None
+
+
+class IntentRequest(BaseModel):
+    """Text intent routing request."""
+    text: str
+    emotion: Optional[str] = None
 
 
 @router.post("/generate-tasks", response_model=TaskGenerationResponse)
@@ -194,6 +201,15 @@ async def chat(request: ChatRequest):
             reply=reply,
             audio_url=audio_url,
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intent")
+async def intent(request: IntentRequest):
+    """Text intent routing (no ASR)."""
+    try:
+        return await process_user_intent(request.text, request.emotion)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
