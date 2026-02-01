@@ -1412,6 +1412,9 @@ body {
 
 .window.is-task-running .chat-bubble-user {
   align-self: flex-end;
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .window.is-task-running .chat-bubble-assistant {
@@ -1534,6 +1537,16 @@ body {
   flex: 0 0 auto;
 }
 
+.window.is-task-running .todo-card-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.window.is-task-running .todo-card--archived {
+  opacity: 0.92;
+}
+
 .window.is-task-running .todo-meta {
   display: flex;
   justify-content: space-between;
@@ -1648,6 +1661,13 @@ body {
   border-radius: 0;
   max-width: 360px;
   background: transparent;
+}
+
+.window.is-task-running .task-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: flex-start;
 }
 
 .window.is-task-running .task-history-item.is-user {

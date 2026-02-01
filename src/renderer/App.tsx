@@ -28,6 +28,18 @@ type TodoItem = {
   text: string;
 };
 
+type TaskBoard = {
+  id: string;
+  title: string;
+  date: string;
+  todoItems: TodoItem[];
+  doneItems: TodoItem[];
+};
+
+type TaskTimelineItem =
+  | { type: 'message'; id: string }
+  | { type: 'board'; id: string };
+
 type TaskMessage = {
   id: string;
   role: 'user' | 'assistant';
@@ -102,9 +114,16 @@ const App: React.FC = () => {
   const [chatAssistantText, setChatAssistantText] = useState(
     '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list',
   );
+  const initialBoardIdRef = useRef(`board-${Date.now()}`);
   const [taskTitle, setTaskTitle] = useState('数字媒体论文');
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [isInitialTaskLocked, setIsInitialTaskLocked] = useState(false);
+  const [taskDate, setTaskDate] = useState(getBeijingDate());
+  const [taskBoards, setTaskBoards] = useState<TaskBoard[]>([]);
+  const [activeBoardId, setActiveBoardId] = useState(initialBoardIdRef.current);
+  const [taskTimeline, setTaskTimeline] = useState<TaskTimelineItem[]>([
+    { type: 'board', id: initialBoardIdRef.current },
+  ]);
   const returnViewRef = useRef<PrimaryView>('home');
   const primaryView: PrimaryView = currentView === 'profile' ? returnViewRef.current : currentView;
   const isTaskRunning = primaryView === 'task';
@@ -137,12 +156,158 @@ const App: React.FC = () => {
   ]);
   const [doneItems, setDoneItems] = useState<TodoItem[]>([]);
   const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
+  const [archivedTransitions, setArchivedTransitions] = useState<Record<string, 'toDone' | 'toTodo'>>({});
 
   const taskInputRef = useRef<HTMLInputElement | null>(null);
+  const taskScrollRef = useRef<HTMLDivElement | null>(null);
   const todoRefs = useRef(new Map<string, HTMLLIElement>());
   const doneRefs = useRef(new Map<string, HTMLLIElement>());
   const todoPositions = useRef(new Map<string, DOMRect>());
   const donePositions = useRef(new Map<string, DOMRect>());
+
+  const renderTodoCard = (
+    board: TaskBoard,
+    interactive: boolean,
+    onMarkDone: (id: string) => void,
+    onRestore: (id: string) => void,
+  ) => (
+    <div className={`todo-card ${interactive ? '' : 'todo-card--archived'}`}>
+      <div className="todo-meta">
+        <span className="todo-date">{board.date}</span>
+        <span className="todo-project">{board.title}</span>
+      </div>
+      <div className="todo-title-row">TO DO</div>
+      <ul className="todo-list todo-list--todo">
+        {board.todoItems.map((item) => {
+          const transitionKey = board.id === activeBoardId ? item.id : `${board.id}:${item.id}`;
+          const transition = board.id === activeBoardId
+            ? transitioning[item.id]
+            : archivedTransitions[transitionKey];
+          return (
+            <li
+              key={item.id}
+              ref={(node) => {
+                if (board.id !== activeBoardId) return;
+                if (node) {
+                  todoRefs.current.set(item.id, node);
+                } else {
+                  todoRefs.current.delete(item.id);
+                }
+              }}
+              className={`todo-item ${transition === 'toDone' ? 'is-completing' : ''}`}
+            >
+              <button
+                className="todo-check"
+                type="button"
+                aria-label="Mark done"
+                onClick={() => onMarkDone(item.id)}
+                disabled={!interactive}
+              >
+                <span className="todo-check-circle" />
+              </button>
+              <span className="todo-text">{item.text}</span>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="todo-divider" />
+        <div className="todo-title-row todo-title-done">DONE</div>
+        <ul className="todo-list todo-list--done">
+        {board.doneItems.map((item) => {
+          const transitionKey = board.id === activeBoardId ? item.id : `${board.id}:${item.id}`;
+          const transition = board.id === activeBoardId
+            ? transitioning[item.id]
+            : archivedTransitions[transitionKey];
+          return (
+            <li
+              key={item.id}
+              ref={(node) => {
+                if (board.id !== activeBoardId) return;
+                if (node) {
+                  doneRefs.current.set(item.id, node);
+                } else {
+                  doneRefs.current.delete(item.id);
+                }
+              }}
+              className={`todo-item is-done ${transition === 'toTodo' ? 'is-restoring' : ''}`}
+            >
+              <button
+                className="todo-check"
+                type="button"
+                aria-label="Restore"
+                onClick={() => onRestore(item.id)}
+                disabled={!interactive}
+              >
+                <span className="todo-check-circle" />
+              </button>
+              <span className="todo-text">{item.text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+
+  const markBoardTodoDone = (boardId: string, itemId: string) => {
+    const key = `${boardId}:${itemId}`;
+    if (archivedTransitions[key]) return;
+    setArchivedTransitions((prev) => ({ ...prev, [key]: 'toDone' }));
+    window.setTimeout(() => {
+      setTaskBoards((prev) => prev.map((board) => {
+        if (board.id !== boardId) return board;
+        const item = board.todoItems.find((todo) => todo.id === itemId);
+        if (!item) return board;
+        if (board.doneItems.some((todo) => todo.id === itemId)) return board;
+        return {
+          ...board,
+          todoItems: board.todoItems.filter((todo) => todo.id !== itemId),
+          doneItems: [...board.doneItems.filter((todo) => todo.id !== itemId), item],
+        };
+      }));
+      setArchivedTransitions((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, 220);
+  };
+
+  const restoreBoardTodo = (boardId: string, itemId: string) => {
+    const key = `${boardId}:${itemId}`;
+    if (archivedTransitions[key]) return;
+    setArchivedTransitions((prev) => ({ ...prev, [key]: 'toTodo' }));
+    window.setTimeout(() => {
+      setTaskBoards((prev) => prev.map((board) => {
+        if (board.id !== boardId) return board;
+        const item = board.doneItems.find((todo) => todo.id === itemId);
+        if (!item) return board;
+        if (board.todoItems.some((todo) => todo.id === itemId)) return board;
+        return {
+          ...board,
+          doneItems: board.doneItems.filter((todo) => todo.id !== itemId),
+          todoItems: [...board.todoItems.filter((todo) => todo.id !== itemId), item],
+        };
+      }));
+      setArchivedTransitions((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, 220);
+  };
+
+  const getBoardById = (boardId: string): TaskBoard | null => {
+    if (boardId === activeBoardId) {
+      return {
+        id: boardId,
+        title: taskTitle,
+        date: taskDate,
+        todoItems,
+        doneItems,
+      };
+    }
+    return taskBoards.find((board) => board.id === boardId) ?? null;
+  };
 
   const toggleProfilePanel = () => {
     if (currentView === 'profile') {
@@ -238,7 +403,13 @@ const App: React.FC = () => {
     }
   };
 
-  const generateTasks = async (description: string) => {
+  const appendTaskMessage = (role: TaskMessage['role'], text: string) => {
+    const id = `task-msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setTaskMessages((prev) => [...prev, { id, role, text }]);
+    setTaskTimeline((prev) => [...prev, { type: 'message', id }]);
+  };
+
+  const generateTasks = async (description: string, archiveExisting: boolean) => {
     if (!description.trim()) return;
     setIsGeneratingTasks(true);
     try {
@@ -250,10 +421,27 @@ const App: React.FC = () => {
       if (!response.ok) return;
       const data = await response.json();
       const tasks: string[] = data?.tasks ?? [];
+      if (archiveExisting) {
+        setTaskBoards((prev) => [
+          ...prev,
+          {
+            id: activeBoardId,
+            title: taskTitle,
+            date: taskDate,
+            todoItems: [...todoItems],
+            doneItems: [...doneItems],
+          },
+        ]);
+      }
       const baseId = Date.now();
-      setTaskTitle(summarizeTopic(description, tasks));
+      const newBoardId = `board-${baseId}`;
+      setTaskTitle(data?.topic || summarizeTopic(description, tasks));
       setTodoItems(tasks.map((text, index) => ({ id: `todo-${baseId}-${index}`, text })));
       setDoneItems([]);
+      setTaskDate(getBeijingDate());
+      setTransitioning({});
+      setActiveBoardId(newBoardId);
+      setTaskTimeline((prev) => [...prev, { type: 'board', id: newBoardId }]);
     } finally {
       setIsGeneratingTasks(false);
     }
@@ -273,10 +461,7 @@ const App: React.FC = () => {
         setChatAssistantText(reply);
         setIsInitialTaskLocked(true);
       }
-      setTaskMessages((prev) => [
-        ...prev,
-        { id: `task-msg-${Date.now()}-assistant`, role: 'assistant', text: reply },
-      ]);
+      appendTaskMessage('assistant', reply);
     }
     if (data?.audio_url) {
       playAudioFromUrl(data.audio_url);
@@ -329,7 +514,7 @@ const App: React.FC = () => {
       const title = interaction.ui_payload?.content?.title ?? cleanedUserText ?? '任务拆解';
       setTaskTitle(title);
       if (cleanedUserText) {
-        await generateTasks(cleanedUserText);
+        await generateTasks(cleanedUserText, isInitialTaskLocked);
       }
       if (cleanedUserText) setIsInitialTaskLocked(true);
       setCurrentView('task');
@@ -347,6 +532,19 @@ const App: React.FC = () => {
     }
     const interaction = await response.json();
     await applyInteraction(interaction, text);
+    return interaction;
+  };
+
+  const requestIntent = async (text: string) => {
+    const response = await fetch(`${API_BASE}/api/interaction/intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!response.ok) {
+      throw new Error('Intent request failed');
+    }
+    return response.json();
   };
 
   const sendVoiceIntent = async (audioBlob: Blob) => {
@@ -427,11 +625,43 @@ const App: React.FC = () => {
 
   const handleTaskInputSubmit = async (text: string) => {
     const cleaned = sanitizeText(text);
-    setTaskMessages((prev) => [
-      ...prev,
-      { id: `task-msg-${Date.now()}`, role: 'user', text: cleaned },
-    ]);
-    await generateTasks(cleaned);
+    const shouldArchive = isInitialTaskLocked;
+    appendTaskMessage('user', cleaned);
+    try {
+      const interaction = await requestIntent(cleaned);
+      if (interaction?.type === 'command') {
+        await applyInteraction(interaction, cleaned);
+        return;
+      }
+      if (interaction?.type === 'breakdown') {
+        if (interaction?.audio_text) {
+          const assistantText = sanitizeText(interaction.audio_text);
+          if (!isInitialTaskLocked) {
+            setChatUserText(cleaned);
+            setChatAssistantText(assistantText);
+            setIsInitialTaskLocked(true);
+          }
+          appendTaskMessage('assistant', assistantText);
+          try {
+            const speakResponse = await fetch(`${API_BASE}/api/interaction/speak`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
+            });
+            if (speakResponse.ok) {
+              const payload = await speakResponse.json();
+              playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+            }
+          } catch {
+            // ignore speak errors
+          }
+        }
+        await generateTasks(cleaned, shouldArchive);
+        return;
+      }
+    } catch {
+      // ignore intent errors
+    }
     await sendChatMessage(cleaned);
   };
 
@@ -446,24 +676,27 @@ const App: React.FC = () => {
     const payload = await response.json();
     const userText = sanitizeText(payload?.data?.user?.text || '');
     const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
+    const interaction = payload?.data?.interaction;
+    const shouldArchive = isInitialTaskLocked;
+    if (interaction?.type === 'command') {
+      await applyInteraction(interaction, userText);
+      return;
+    }
     if (userText) {
       if (!isInitialTaskLocked) {
         setChatUserText(userText);
       }
-      setTaskMessages((prev) => [
-        ...prev,
-        { id: `task-msg-${Date.now()}-user`, role: 'user', text: userText },
-      ]);
+      appendTaskMessage('user', userText);
     }
     if (assistantText) {
       if (!isInitialTaskLocked) {
         setChatAssistantText(assistantText);
         setIsInitialTaskLocked(true);
       }
-      setTaskMessages((prev) => [
-        ...prev,
-        { id: `task-msg-${Date.now()}-assistant`, role: 'assistant', text: assistantText },
-      ]);
+      appendTaskMessage('assistant', assistantText);
+    }
+    if (interaction?.type === 'breakdown' && userText) {
+      await generateTasks(userText, shouldArchive);
     }
     playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
   };
@@ -518,6 +751,15 @@ const App: React.FC = () => {
       taskInputRef.current?.focus();
     }
   }, [isTaskRunning]);
+
+  useEffect(() => {
+    if (!isTaskRunning) return;
+    const container = taskScrollRef.current;
+    if (!container) return;
+    requestAnimationFrame(() => {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    });
+  }, [isTaskRunning, taskTimeline.length, todoItems.length, doneItems.length, taskBoards.length]);
 
   useEffect(() => {
     let mounted = true;
@@ -856,7 +1098,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="task-panel" data-name="对话" data-node-id="310:264">
                   <div className="task-panel-content">
-                    <div className="task-scroll">
+                    <div className="task-scroll" ref={taskScrollRef}>
                       <div className="chat-block">
                         <div className="chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
                           {chatUserText}
@@ -865,85 +1107,38 @@ const App: React.FC = () => {
                           {chatAssistantText}
                         </div>
                       </div>
-                      <div className="todo-card">
-                        <div className="todo-meta">
-                          <span className="todo-date">{getBeijingDate()}</span>
-                          <span className="todo-project">{taskTitle}</span>
-                        </div>
-                        <div className="todo-title-row">TO DO</div>
-                        <ul className="todo-list todo-list--todo">
-                          {todoItems.map((item) => {
-                            const transition = transitioning[item.id];
-
-  return (
-                              <li
+                      <div className="task-timeline">
+                        {taskTimeline.map((item) => {
+                          if (item.type === 'message') {
+                            const message = taskMessages.find((entry) => entry.id === item.id);
+                            if (!message) return null;
+                            return (
+                              <div
                                 key={item.id}
-                                ref={(node) => {
-                                  if (node) {
-                                    todoRefs.current.set(item.id, node);
-                                  } else {
-                                    todoRefs.current.delete(item.id);
-                                  }
-                                }}
-                                className={`todo-item ${transition === 'toDone' ? 'is-completing' : ''}`}
+                                className={`task-history-item ${message.role === 'user' ? 'is-user glass-widget glass-widget--border glass-widget-surface' : 'is-assistant'}`}
                               >
-                                <button
-                                  className="todo-check"
-                                  type="button"
-                                  aria-label="Mark done"
-                                  onClick={() => markTodoDone(item.id)}
-                                >
-                                  <span className="todo-check-circle" />
-                                </button>
-                                <span className="todo-text">{item.text}</span>
-                              </li>
+                                {message.text}
+                              </div>
                             );
-                          })}
-                        </ul>
-                        <div className="todo-divider" />
-                        <div className="todo-title-row todo-title-done">DONE</div>
-                        <ul className="todo-list todo-list--done">
-                          {doneItems.map((item) => {
-                            const transition = transitioning[item.id];
-
-  return (
-                              <li
-                                key={item.id}
-                                ref={(node) => {
-                                  if (node) {
-                                    doneRefs.current.set(item.id, node);
-                                  } else {
-                                    doneRefs.current.delete(item.id);
-                                  }
-                                }}
-                                className={`todo-item is-done ${transition === 'toTodo' ? 'is-restoring' : ''}`}
-                              >
-                                <button
-                                  className="todo-check"
-                                  type="button"
-                                  aria-label="Restore"
-                                  onClick={() => restoreTodo(item.id)}
-                                >
-                                  <span className="todo-check-circle" />
-                                </button>
-                                <span className="todo-text">{item.text}</span>
-                              </li>
-                            );
-                          })}
-                        </ul>
+                          }
+                          const board = getBoardById(item.id);
+                          if (!board) return null;
+                          return (
+                            <React.Fragment key={item.id}>
+                              {renderTodoCard(
+                                board,
+                                true,
+                                board.id === activeBoardId
+                                  ? markTodoDone
+                                  : (itemId) => markBoardTodoDone(board.id, itemId),
+                                board.id === activeBoardId
+                                  ? restoreTodo
+                                  : (itemId) => restoreBoardTodo(board.id, itemId),
+                              )}
+                            </React.Fragment>
+                          );
+                        })}
                       </div>
-                      {taskMessages.length > 0 && (
-                        <div className="task-history">
-                          {taskMessages.map((message) => (
-                            <div
-                              key={message.id}
-                              className={`task-history-item ${message.role === 'user' ? 'is-user glass-widget glass-widget--border glass-widget-surface' : 'is-assistant'}`}
-                            >
-                              {message.text}
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                     <div className="task-input">
                       <VoiceInput

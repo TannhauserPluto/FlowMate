@@ -25,6 +25,7 @@ class TaskGenerationResponse(BaseModel):
     """Task generation response."""
     tasks: List[str]
     original_description: str
+    topic: Optional[str] = None
 
 
 class AIResponseRequest(BaseModel):
@@ -81,9 +82,11 @@ async def generate_tasks(request: TaskGenerationRequest):
     """Generate task breakdown."""
     try:
         tasks = await agent_brain.generate_task_breakdown(request.task_description)
+        topic = await agent_brain.generate_task_topic(request.task_description, tasks)
         return TaskGenerationResponse(
             tasks=tasks,
             original_description=request.task_description,
+            topic=topic or None,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

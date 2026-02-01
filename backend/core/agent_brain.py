@@ -4,6 +4,7 @@ FlowMate-Echo Agent Brain
 """
 
 import json
+import os
 from typing import Optional, List
 import httpx
 from config import settings
@@ -19,7 +20,7 @@ class AgentBrain:
         self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
         self.prompts = PromptTemplates()
         # MVP: 启用预制响应 (演示用)
-        self.use_preset = True
+        self.use_preset = os.getenv("FLOWMATE_USE_PRESET", "false").lower() == "true"
 
     async def _call_qwen(self, messages: List[dict], max_tokens: int = 1024) -> Optional[str]:
         """调用 Qwen-Max API"""
@@ -107,8 +108,27 @@ class AgentBrain:
             if tasks:
                 return tasks[:3]
 
-        # 最终回退：使用预制响应
-        return self._get_preset_tasks(task_description)
+        # 最终回退：仅在启用预制模式时使用
+        if self.use_preset:
+            return self._get_preset_tasks(task_description)
+        raise RuntimeError("LLM task breakdown unavailable")
+
+    async def generate_task_topic(self, task_description: str, steps: List[str]) -> str:
+        """Generate a short topic for the task (<= 8 chars)."""
+        messages = [
+            {
+                "role": "system",
+                "content": "你是任务标题生成器，只输出一个不超过8个中文字符的主题短语，不要解释。",
+            },
+            {
+                "role": "user",
+                "content": f"任务：{task_description}\n步骤：{steps}\n主题：",
+            },
+        ]
+        response = await self._call_qwen(messages, max_tokens=30)
+        if response:
+            return response.strip().splitlines()[0][:8]
+        return ""
 
     async def generate_encouragement(
         self, flow_state: str, work_duration: int, fatigue_level: int
