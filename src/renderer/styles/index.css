@@ -889,13 +889,15 @@ body {
   transform: translateX(-50%);
 }
 
-.avatar-image img {
+.avatar-image img,
+.avatar-image video {
   position: absolute;
   width: 168.53%;
   height: 140.06%;
   left: -33.19%;
   top: -10.39%;
   object-fit: cover;
+  display: block;
 }
 
 .mute-button {

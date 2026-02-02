@@ -4,7 +4,6 @@ import VoiceInput from './components/VoiceInput';
 import ActionFloatingBtn from './components/ActionFloatingBtn';
 import imgAudioWave from './assets/figma/audio-wave.png';
 import imgPlusMath from './assets/figma/plus.png';
-import imgGemini from './assets/figma/gemini.png';
 import imgMute from './assets/figma/mute.png';
 import imgInnerBg from './assets/figma/inner-bg.png';
 import imgNavAvatar from './assets/figma/nav-avatar.png';
@@ -18,6 +17,10 @@ import starLv1 from './assets/star/star-lv1.png';
 import starLv2 from './assets/star/star-lv2.png';
 import starLv3 from './assets/star/stat-lv3.png';
 import starLv4 from './assets/star/star-lv4.png';
+import vidIdle from './assets/video_loops/idle.webm';
+import vidTalk from './assets/video_loops/talk.webm';
+import vidFocus from './assets/video_loops/focus.webm';
+import vidStretch from './assets/video_loops/Stretch.webm';
 
 
 type View = 'home' | 'task' | 'timer' | 'focus' | 'break' | 'profile';
@@ -179,6 +182,13 @@ const App: React.FC = () => {
   const recordingHandlerRef = useRef<((blob: Blob) => Promise<void> | void) | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
+  const audioEventsBoundRef = useRef(false);
+  const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
+  const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
+  const lastViewRef = useRef<View | null>(null);
+  const currentViewRef = useRef<View>(currentView);
+  const [breakStretchPlayed, setBreakStretchPlayed] = useState(false);
+  const [breakStretchQueued, setBreakStretchQueued] = useState(false);
 
   const [todoItems, setTodoItems] = useState<TodoItem[]>(() => buildDefaultTodos());
   const [doneItems, setDoneItems] = useState<TodoItem[]>([]);
@@ -391,6 +401,8 @@ const App: React.FC = () => {
     setIsAwaitingRestDecision(false);
     const nextMessage = message ?? BREAK_DEFAULT_MESSAGE;
     setBreakMessage(nextMessage);
+    setBreakStretchQueued(false);
+    setBreakStretchPlayed(false);
     setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
     setCurrentView('break');
     speakText(nextMessage);
@@ -471,6 +483,24 @@ const App: React.FC = () => {
       audioPlayerRef.current = new Audio();
       audioPlayerRef.current.preload = 'auto';
       audioPlayerRef.current.volume = 1;
+    }
+    if (audioPlayerRef.current && !audioEventsBoundRef.current) {
+      const audio = audioPlayerRef.current;
+      audioEventsBoundRef.current = true;
+      audio.addEventListener('play', () => setIsAvatarSpeaking(true));
+      audio.addEventListener('ended', () => {
+        setIsAvatarSpeaking(false);
+        if (currentViewRef.current === 'break') {
+          setBreakStretchQueued(true);
+          setBreakStretchPlayed(false);
+        }
+      });
+      audio.addEventListener('pause', () => {
+        if (audio.ended || audio.currentTime === 0) {
+          setIsAvatarSpeaking(false);
+        }
+      });
+      audio.addEventListener('error', () => setIsAvatarSpeaking(false));
     }
     return audioPlayerRef.current;
   };
@@ -1260,6 +1290,115 @@ const App: React.FC = () => {
   }, [isBreakView]);
 
   useEffect(() => {
+    currentViewRef.current = currentView;
+    if (currentView !== 'break') {
+      setBreakStretchQueued(false);
+      setBreakStretchPlayed(false);
+    }
+  }, [currentView]);
+
+  useEffect(() => {
+    if (isBreakView && isAvatarSpeaking) {
+      setBreakStretchPlayed(false);
+      setBreakStretchQueued(false);
+    }
+  }, [isBreakView, isAvatarSpeaking]);
+
+  useEffect(() => {
+    const video = avatarVideoRef.current;
+    if (!video) return;
+    const handleEnded = () => {
+      if (video.dataset.state === 'stretch') {
+        setBreakStretchPlayed(true);
+      }
+    };
+    video.addEventListener('ended', handleEnded);
+    return () => video.removeEventListener('ended', handleEnded);
+  }, []);
+
+  useEffect(() => {
+    const video = avatarVideoRef.current;
+    if (!video) return;
+    const prevView = lastViewRef.current;
+    if (prevView !== currentView) {
+      lastViewRef.current = currentView;
+    }
+    if (currentView === 'break' && prevView !== 'break') {
+      setBreakStretchPlayed(false);
+    }
+
+    const playAvatar = (state: string, src: string, loop: boolean, restart: boolean) => {
+      if (video.dataset.state !== state) {
+        video.src = src;
+        video.dataset.state = state;
+      }
+      video.loop = loop;
+      if (restart) {
+        try {
+          video.currentTime = 0;
+        } catch {
+          // ignore seek errors
+        }
+      }
+      if (loop || restart) {
+        video.play().catch(() => {});
+      }
+    };
+
+    if (isBreakView) {
+      if (isAvatarSpeaking) {
+        playAvatar('talk', vidTalk, true, prevView !== currentView || video.dataset.state !== 'talk');
+        return;
+      }
+      if (breakStretchQueued && !breakStretchPlayed) {
+        playAvatar('stretch', vidStretch, false, prevView !== currentView || video.dataset.state !== 'stretch');
+        return;
+      }
+      video.pause();
+      return;
+    }
+
+    if (isFocusView) {
+      if (isAvatarSpeaking) {
+        playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
+      } else {
+        playAvatar('focus', vidFocus, true, video.dataset.state !== 'focus');
+      }
+      return;
+    }
+
+    if (isTaskRunning || primaryView === 'timer') {
+      if (isAvatarSpeaking) {
+        playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
+        return;
+      }
+      if (prevView !== currentView) {
+        playAvatar('idle', vidIdle, false, true);
+      }
+      return;
+    }
+
+    if (primaryView === 'home') {
+      if (isAvatarSpeaking) {
+        playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
+        return;
+      }
+      if (prevView !== 'home') {
+        playAvatar('idle', vidIdle, false, true);
+      }
+    }
+  }, [
+    currentView,
+    isAvatarSpeaking,
+    isBreakView,
+    isFocusView,
+    isTaskRunning,
+    primaryView,
+    breakStretchPlayed,
+    breakStretchQueued,
+  ]);
+
+  useEffect(() => {
     if (!isFocusRunning || isCountUp) return;
     if (remainingSeconds !== 0) return;
     if (finishRequestedRef.current) return;
@@ -1543,7 +1682,7 @@ const App: React.FC = () => {
                     />
                   </div>
                   <div className="avatar-image" data-name="Gemini" data-node-id="262:231">
-                    <img src={imgGemini} alt="" />
+                    <video ref={avatarVideoRef} muted playsInline preload="auto" />
                   </div>
                   <button className="mute-button" type="button" data-node-id="262:232">
                     <span className="mute-button-bg glass-widget glass-widget--border glass-widget-surface" aria-hidden="true" />
