@@ -8,6 +8,13 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from pathlib import Path
+from datetime import datetime
+import random
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback for older environments
+    ZoneInfo = None
 
 from core import agent_brain, flow_manager
 from services import audio_service, voice_pipeline_service
@@ -243,6 +250,25 @@ async def get_encouragement():
         from core.prompt_templates import PromptTemplates
         prompts = PromptTemplates()
         encouragement = prompts.get_encouragement_by_state(state, work_minutes)
+        if state == "idle":
+            now = datetime.now(ZoneInfo("Asia/Shanghai")) if ZoneInfo else datetime.now()
+            hour = now.hour
+            if 5 <= hour < 12:
+                options = [
+                    "早上好呀，今天准备学习什么呢？",
+                    "早安，加油学习哦。",
+                ]
+            elif 12 <= hour < 18:
+                options = [
+                    "下午好呀，今天准备学习什么呢？",
+                    "下午好，准备开始了吗？",
+                ]
+            else:
+                options = [
+                    "晚上好呀，今天准备学习什么呢？",
+                    "晚上好，准备一起进入专注模式吗？",
+                ]
+            encouragement = random.choice(options)
 
         return {
             "state": state,

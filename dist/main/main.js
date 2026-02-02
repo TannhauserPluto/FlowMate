@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.mainWindow = void 0;
 const electron_1 = require("electron");
 const electron_2 = require("electron");
+const electron_3 = require("electron");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 let mainWindow = null;
@@ -58,6 +59,7 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
+            sandbox: false,
             preload: path.join(__dirname, 'preload.js'),
         },
     });
@@ -113,6 +115,25 @@ function createWindow() {
         mainWindow.close();
         return true;
     });
+    electron_1.ipcMain.handle('screen:capture', async () => {
+        try {
+            const display = electron_1.screen.getPrimaryDisplay();
+            const { width, height } = display.size;
+            const sources = await electron_1.desktopCapturer.getSources({
+                types: ['screen'],
+                thumbnailSize: { width, height },
+            });
+            const primaryId = display.id.toString();
+            const source = sources.find((item) => item.display_id === primaryId) ?? sources[0];
+            if (!source)
+                return null;
+            return source.thumbnail.toDataURL();
+        }
+        catch (error) {
+            console.error('[screen:capture] failed', error);
+            return null;
+        }
+    });
     if (isDev) {
         mainWindow.loadURL('http://localhost:5173');
         mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -120,6 +141,10 @@ function createWindow() {
     else {
         mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
     }
+    mainWindow.webContents.on('did-finish-load', () => {
+        console.log('[renderer] did-finish-load', mainWindow?.webContents.getURL());
+        mainWindow?.webContents.executeJavaScript('console.log(\"[renderer] alive\")');
+    });
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
         console.error('[renderer] process gone', details);
     });
@@ -174,6 +199,31 @@ function createTray() {
 electron_1.app.whenReady().then(() => {
     createWindow();
     createTray();
+    const okScreen = electron_3.globalShortcut.register('CommandOrControl+1', () => {
+        if (!mainWindow)
+            return;
+        console.log('[globalShortcut] screen triggered');
+        mainWindow.webContents.send('focus:shortcut', 'screen');
+    });
+    const okFatigue = electron_3.globalShortcut.register('CommandOrControl+2', () => {
+        if (!mainWindow)
+            return;
+        console.log('[globalShortcut] fatigue triggered');
+        mainWindow.webContents.send('focus:shortcut', 'fatigue');
+    });
+    const okFinal = electron_3.globalShortcut.register('CommandOrControl+3', () => {
+        if (!mainWindow)
+            return;
+        console.log('[globalShortcut] final10 triggered');
+        mainWindow.webContents.send('focus:shortcut', 'final10');
+    });
+    if (!okScreen || !okFatigue || !okFinal) {
+        console.warn('[globalShortcut] register failed', {
+            screen: okScreen,
+            fatigue: okFatigue,
+            final10: okFinal,
+        });
+    }
     electron_1.app.on('activate', () => {
         if (electron_1.BrowserWindow.getAllWindows().length === 0) {
             createWindow();
@@ -188,4 +238,5 @@ electron_1.app.on('window-all-closed', () => {
 });
 electron_1.app.on('before-quit', () => {
     isQuitting = true;
+    electron_3.globalShortcut.unregisterAll();
 });

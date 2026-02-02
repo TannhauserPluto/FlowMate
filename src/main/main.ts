@@ -1,5 +1,6 @@
-﻿import { app, BrowserWindow, ipcMain } from 'electron';
+﻿import { app, BrowserWindow, ipcMain, desktopCapturer, screen } from 'electron';
 import { Menu, Tray, nativeImage } from 'electron';
+import { globalShortcut } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -26,6 +27,7 @@ function createWindow(): void {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: false,
       preload: path.join(__dirname, 'preload.js'),
     },
   });
@@ -81,6 +83,23 @@ function createWindow(): void {
     mainWindow.close();
     return true;
   });
+  ipcMain.handle('screen:capture', async () => {
+    try {
+      const display = screen.getPrimaryDisplay();
+      const { width, height } = display.size;
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width, height },
+      });
+      const primaryId = display.id.toString();
+      const source = sources.find((item) => item.display_id === primaryId) ?? sources[0];
+      if (!source) return null;
+      return source.thumbnail.toDataURL();
+    } catch (error) {
+      console.error('[screen:capture] failed', error);
+      return null;
+    }
+  });
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
@@ -88,6 +107,11 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('[renderer] did-finish-load', mainWindow?.webContents.getURL());
+    mainWindow?.webContents.executeJavaScript('console.log(\"[renderer] alive\")');
+  });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     console.error('[renderer] process gone', details);
@@ -147,6 +171,29 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
 
+  const okScreen = globalShortcut.register('CommandOrControl+1', () => {
+    if (!mainWindow) return;
+    console.log('[globalShortcut] screen triggered');
+    mainWindow.webContents.send('focus:shortcut', 'screen');
+  });
+  const okFatigue = globalShortcut.register('CommandOrControl+2', () => {
+    if (!mainWindow) return;
+    console.log('[globalShortcut] fatigue triggered');
+    mainWindow.webContents.send('focus:shortcut', 'fatigue');
+  });
+  const okFinal = globalShortcut.register('CommandOrControl+3', () => {
+    if (!mainWindow) return;
+    console.log('[globalShortcut] final10 triggered');
+    mainWindow.webContents.send('focus:shortcut', 'final10');
+  });
+  if (!okScreen || !okFatigue || !okFinal) {
+    console.warn('[globalShortcut] register failed', {
+      screen: okScreen,
+      fatigue: okFatigue,
+      final10: okFinal,
+    });
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -163,6 +210,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  globalShortcut.unregisterAll();
 });
 
 export { mainWindow };

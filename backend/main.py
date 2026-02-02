@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from config import settings
-from api import perception, interaction, brain
+from api import perception, interaction, brain, focus
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -30,6 +30,7 @@ app.add_middleware(
 app.include_router(perception.router, prefix="/api/perception", tags=["感知"])
 app.include_router(interaction.router, prefix="/api/interaction", tags=["交互"])
 app.include_router(brain.router, prefix="/api/brain", tags=["Brain - AI决策"])
+app.include_router(focus.router, prefix="/api/focus", tags=["Focus"])
 
 
 @app.get("/")

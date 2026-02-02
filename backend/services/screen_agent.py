@@ -83,7 +83,12 @@ class ScreenAgentService:
     
     # ==================== 主入口 ====================
     
-    async def audit_screen(self, image_b64: str, current_task: str) -> Dict:
+    async def audit_screen(
+        self,
+        image_b64: str,
+        current_task: str,
+        cooldown_seconds: Optional[int] = None,
+    ) -> Dict:
         """
         审计屏幕专注度 (主入口方法)
         
@@ -108,10 +113,11 @@ class ScreenAgentService:
         # ========== 步骤 A: 时间冷却检查 ==========
         current_time = time.time()
         time_since_last_call = current_time - self._last_api_call_time
-        
-        if time_since_last_call < self.TIME_COOLDOWN_SECONDS:
+        cooldown = self.TIME_COOLDOWN_SECONDS if cooldown_seconds is None else max(0, cooldown_seconds)
+
+        if time_since_last_call < cooldown:
             # 未超过冷却时间，直接返回缓存结果
-            remaining = int(self.TIME_COOLDOWN_SECONDS - time_since_last_call)
+            remaining = int(cooldown - time_since_last_call)
             print(f"[ScreenAgent] 时间冷却中，剩余 {remaining} 秒，返回缓存结果")
             result = self._last_analysis_result.copy()
             result["source"] = "cache"

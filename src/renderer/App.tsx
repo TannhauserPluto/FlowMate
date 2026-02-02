@@ -131,6 +131,18 @@ const App: React.FC = () => {
   const isTimerView = primaryView === 'timer' || isFocusView;
   const isHomeView = primaryView === 'home';
   const [isFocusRunning, setIsFocusRunning] = useState(false);
+  const [isCountUp, setIsCountUp] = useState(false);
+  const [focusSessionId, setFocusSessionId] = useState<string | null>(null);
+  const [focusTaskText, setFocusTaskText] = useState('');
+  const [focusPrompt, setFocusPrompt] = useState('');
+  const [isAwaitingRestDecision, setIsAwaitingRestDecision] = useState(false);
+  const focusSessionIdRef = useRef<string | null>(null);
+  const focusTaskTextRef = useRef('');
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const screenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const screenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const screenCheckTimeoutRef = useRef<number | null>(null);
+  const fatigueTimeoutRef = useRef<number | null>(null);
   const [timerValue, setTimerValue] = useState<TimeWheelValue>({
     hour: 0,
     minuteTens: 2,
@@ -139,6 +151,7 @@ const App: React.FC = () => {
     secondOnes: 0,
   });
   const [remainingSeconds, setRemainingSeconds] = useState(() => toTotalSeconds(timerValue));
+  const remainingSecondsRef = useRef(remainingSeconds);
   const countdownRef = useRef<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -160,6 +173,7 @@ const App: React.FC = () => {
 
   const taskInputRef = useRef<HTMLInputElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
+  const finishRequestedRef = useRef(false);
   const todoRefs = useRef(new Map<string, HTMLLIElement>());
   const doneRefs = useRef(new Map<string, HTMLLIElement>());
   const todoPositions = useRef(new Map<string, DOMRect>());
@@ -324,6 +338,11 @@ const App: React.FC = () => {
   };
 
   const handleStartFocus = async () => {
+    try {
+      await ensureScreenStream();
+    } catch (error) {
+      console.warn('[focus] screen capture permission denied', error);
+    }
     if (primaryView === 'task') {
       try {
         await fetch(`${API_BASE}/api/brain/audit/reset`, { method: 'POST' });
@@ -335,9 +354,21 @@ const App: React.FC = () => {
       window.clearInterval(countdownRef.current);
       countdownRef.current = null;
     }
+    resetFocusMonitors();
+    setIsCountUp(false);
+    finishRequestedRef.current = false;
+    setFocusSessionId(null);
+    setFocusTaskText('');
+    setIsAwaitingRestDecision(false);
     setRemainingSeconds(toTotalSeconds(timerValue));
     setIsFocusRunning(true);
     setCurrentView('focus');
+    const inferredTask = primaryView === 'task' ? (taskTitle || chatUserText) : '';
+    if (inferredTask) {
+      startFocusSession(inferredTask);
+    } else {
+      requestFocusPrompt();
+    }
   };
 
   const handlePauseFocus = () => {
@@ -356,6 +387,12 @@ const App: React.FC = () => {
       countdownRef.current = null;
     }
     setIsFocusRunning(false);
+    setIsCountUp(false);
+    finishRequestedRef.current = false;
+    resetFocusMonitors();
+    setFocusSessionId(null);
+    setFocusTaskText('');
+    setIsAwaitingRestDecision(false);
     setCurrentView('timer');
   };
 
@@ -400,6 +437,230 @@ const App: React.FC = () => {
       await audio.play();
     } catch (error) {
       console.warn('[audio] URL play failed', error);
+    }
+  };
+
+  const resetFocusMonitors = () => {
+    if (screenCheckTimeoutRef.current) {
+      window.clearTimeout(screenCheckTimeoutRef.current);
+      screenCheckTimeoutRef.current = null;
+    }
+    if (fatigueTimeoutRef.current) {
+      window.clearTimeout(fatigueTimeoutRef.current);
+      fatigueTimeoutRef.current = null;
+    }
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => track.stop());
+      screenStreamRef.current = null;
+    }
+    screenVideoRef.current = null;
+    screenCanvasRef.current = null;
+  };
+
+  const ensureScreenStream = async () => {
+    if (
+      screenStreamRef.current
+      && screenVideoRef.current
+      && screenStreamRef.current.active
+    ) return;
+    const ipcCapture = (window as any).electron?.invoke;
+    if (ipcCapture) {
+      // In Electron we use main-process capture; no MediaStream needed.
+      return;
+    }
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { cursor: 'always' } as any,
+      audio: false,
+    } as any);
+
+    const video = document.createElement('video');
+    video.muted = true;
+    video.srcObject = stream;
+    await video.play();
+    screenStreamRef.current = stream;
+    screenVideoRef.current = video;
+    screenCanvasRef.current = document.createElement('canvas');
+  };
+
+  const captureScreenBase64 = async (): Promise<string | null> => {
+    const ipcCapture = (window as any).electron?.invoke ? (window as any).electron.invoke : null;
+    if (ipcCapture) {
+      try {
+        const dataUrl = await ipcCapture('screen:capture');
+        if (dataUrl) return dataUrl as string;
+      } catch (error) {
+        console.warn('[focus] ipc screen capture failed', error);
+      }
+    }
+    const video = screenVideoRef.current;
+    const canvas = screenCanvasRef.current;
+    if (!video || !canvas || video.videoWidth === 0 || video.videoHeight === 0) return null;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.8);
+  };
+
+  const scheduleScreenCheck = (delayMs: number) => {
+    if (screenCheckTimeoutRef.current) {
+      window.clearTimeout(screenCheckTimeoutRef.current);
+    }
+    screenCheckTimeoutRef.current = window.setTimeout(async () => {
+      const sessionId = focusSessionIdRef.current;
+      const taskText = focusTaskTextRef.current;
+      if (!sessionId || !taskText) {
+        requestFocusPrompt();
+        return;
+      }
+      try {
+        await ensureScreenStream();
+        const image = await captureScreenBase64();
+        if (!image) {
+          scheduleScreenCheck(8 * 60 * 1000);
+          return;
+        }
+        const response = await fetch(`${API_BASE}/api/focus/screen-check`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            image,
+            task_text: taskText,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const nextInterval = Number(data?.next_interval_seconds ?? 480) * 1000;
+        scheduleScreenCheck(nextInterval);
+      } catch (error) {
+        console.warn('[focus] screen check failed', error);
+      }
+    }, delayMs);
+  };
+
+  const scheduleFatigueCheck = (delayMs: number) => {
+    if (fatigueTimeoutRef.current) {
+      window.clearTimeout(fatigueTimeoutRef.current);
+    }
+    fatigueTimeoutRef.current = window.setTimeout(async () => {
+      const sessionId = focusSessionIdRef.current;
+      if (!sessionId) return;
+      try {
+        const response = await fetch(`${API_BASE}/api/focus/fatigue-check`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            remaining_seconds: remainingSecondsRef.current,
+          }),
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data?.action === 'ask_rest') {
+          setIsAwaitingRestDecision(true);
+          if (data?.audio?.base64) {
+            playAudioFromBase64(data.audio.base64, data.audio.format);
+          }
+        } else if (data?.action === 'shorten') {
+          if (typeof data?.new_remaining_seconds === 'number') {
+            setRemainingSeconds(data.new_remaining_seconds);
+          }
+          if (data?.audio?.base64) {
+            playAudioFromBase64(data.audio.base64, data.audio.format);
+          }
+        }
+      } catch (error) {
+        console.warn('[focus] fatigue check failed', error);
+      } finally {
+        if (isFocusRunning) {
+          scheduleFatigueCheck(6 * 60 * 1000);
+        }
+      }
+    }, delayMs);
+  };
+
+  const requestFocusPrompt = async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/focus/prompt`, { method: 'POST' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data?.prompt) {
+        setFocusPrompt(data.prompt);
+      }
+      if (data?.audio?.base64) {
+        playAudioFromBase64(data.audio.base64, data.audio.format);
+      }
+    } catch {
+      // ignore prompt errors
+    }
+  };
+
+  const parseRestDecision = (text: string) => {
+    const normalized = text.replace(/\s+/g, '');
+    if (!normalized) return null;
+    if (/(不用|不想|继续|不休息|先不)/.test(normalized)) return false;
+    if (/(好|休息|可以|行|嗯|要|好的)/.test(normalized)) return true;
+    return null;
+  };
+
+  const startFocusSession = async (taskText: string) => {
+    const response = await fetch(`${API_BASE}/api/focus/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        task_text: taskText,
+        duration_seconds: remainingSeconds,
+      }),
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    setFocusSessionId(data.session_id);
+    focusSessionIdRef.current = data.session_id;
+    setFocusTaskText(taskText);
+    focusTaskTextRef.current = taskText;
+    setIsAwaitingRestDecision(false);
+    if (data?.reply) {
+      setFocusPrompt(data.reply);
+    }
+    if (data?.audio?.base64) {
+      playAudioFromBase64(data.audio.base64, data.audio.format);
+    }
+    scheduleScreenCheck(0);
+    scheduleFatigueCheck(6 * 60 * 1000);
+  };
+
+  const handleFocusUserText = async (text: string) => {
+    const cleaned = sanitizeText(text);
+    if (!cleaned) return;
+    if (!focusSessionId) {
+      await startFocusSession(cleaned);
+      return;
+    }
+    if (isAwaitingRestDecision) {
+      const decision = parseRestDecision(cleaned);
+      const acceptRest = decision === null ? false : decision;
+      const response = await fetch(`${API_BASE}/api/focus/fatigue-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: focusSessionId,
+          accept_rest: acceptRest,
+          user_text: cleaned,
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data?.audio?.base64) {
+          playAudioFromBase64(data.audio.base64, data.audio.format);
+        }
+        if (data?.action === 'end_focus') {
+          handleEndFocus();
+          return;
+        }
+      }
+      setIsAwaitingRestDecision(false);
     }
   };
 
@@ -709,6 +970,82 @@ const App: React.FC = () => {
     }
   };
 
+  const handleFocusTextSubmit = async (text: string) => {
+    await handleFocusUserText(text);
+  };
+
+  const sendFocusVoice = async (audioBlob: Blob) => {
+    const form = new FormData();
+    form.append('audio', audioBlob, 'voice.webm');
+    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
+      method: 'POST',
+      body: form,
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const userText = sanitizeText(payload?.data?.user?.text || '');
+    await handleFocusUserText(userText);
+  };
+
+  const handleFocusAudioClick = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording(sendFocusVoice);
+    }
+  };
+
+  const triggerFocusShortcut = (action: 'screen' | 'fatigue' | 'final10') => {
+    if (!isFocusView) return;
+    console.log('[focus] shortcut received', action);
+    if (action === 'screen') {
+      scheduleScreenCheck(0);
+    } else if (action === 'fatigue') {
+      scheduleFatigueCheck(0);
+    } else if (action === 'final10') {
+      setIsCountUp(false);
+      setRemainingSeconds(10);
+      setIsFocusRunning(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!isFocusView) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey) return;
+      const key = event.key.toLowerCase();
+      const code = event.code;
+      const isDigit1 = key === '1' || code === 'Digit1' || code === 'Numpad1';
+      const isDigit2 = key === '2' || code === 'Digit2' || code === 'Numpad2';
+      const isDigit3 = key === '3' || code === 'Digit3' || code === 'Numpad3';
+      if (isDigit1) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerFocusShortcut('screen');
+      } else if (isDigit2) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerFocusShortcut('fatigue');
+      } else if (isDigit3) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerFocusShortcut('final10');
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [isFocusView]);
+
+  useEffect(() => {
+    const off = (window as any).electron?.on?.('focus:shortcut', (action: string) => {
+      console.log('[focus] ipc shortcut event', action, 'isFocusView=', isFocusView);
+      triggerFocusShortcut(action === 'fatigue' ? 'fatigue' : action === 'final10' ? 'final10' : 'screen');
+    });
+    return () => {
+      if (typeof off === 'function') off();
+    };
+  }, [isFocusView]);
+
   const animateList = (
     items: TodoItem[],
     refs: React.MutableRefObject<Map<string, HTMLLIElement>>,
@@ -753,6 +1090,12 @@ const App: React.FC = () => {
   }, [isTaskRunning]);
 
   useEffect(() => {
+    if (!isFocusRunning) {
+      resetFocusMonitors();
+    }
+  }, [isFocusRunning]);
+
+  useEffect(() => {
     if (!isTaskRunning) return;
     const container = taskScrollRef.current;
     if (!container) return;
@@ -776,20 +1119,30 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    remainingSecondsRef.current = remainingSeconds;
+  }, [remainingSeconds]);
+
+  useEffect(() => {
+    focusSessionIdRef.current = focusSessionId;
+  }, [focusSessionId]);
+
+  useEffect(() => {
+    focusTaskTextRef.current = focusTaskText;
+  }, [focusTaskText]);
+
+  useEffect(() => {
     if (!isFocusRunning) return;
     if (countdownRef.current) return;
 
     countdownRef.current = window.setInterval(() => {
       setRemainingSeconds((prev) => {
+        if (isCountUp) {
+          return prev + 1;
+        }
         if (prev <= 1) {
-          if (countdownRef.current) {
-            window.clearInterval(countdownRef.current);
-            countdownRef.current = null;
-          }
-          setIsFocusRunning(false);
           return 0;
         }
-        return prev - 1;
+        return Math.max(0, prev - 1);
       });
     }, 1000);
 
@@ -799,7 +1152,45 @@ const App: React.FC = () => {
         countdownRef.current = null;
       }
     };
-  }, [isFocusRunning]);
+  }, [isFocusRunning, isCountUp]);
+
+  useEffect(() => {
+    if (!isFocusRunning || isCountUp) return;
+    if (remainingSeconds !== 0) return;
+    if (finishRequestedRef.current) return;
+    finishRequestedRef.current = true;
+    const decidePositiveTimer = async () => {
+      if (!focusSessionId) {
+        setIsFocusRunning(false);
+        setCurrentView('timer');
+        return;
+      }
+      try {
+        const response = await fetch(`${API_BASE}/api/focus/finish`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: focusSessionId }),
+        });
+        if (!response.ok) {
+          setIsFocusRunning(false);
+          setCurrentView('timer');
+          return;
+        }
+        const data = await response.json();
+        if (data?.start_positive_timer) {
+          setIsCountUp(true);
+          setIsFocusRunning(true);
+        } else {
+          setIsFocusRunning(false);
+          setCurrentView('timer');
+        }
+      } catch {
+        setIsFocusRunning(false);
+        setCurrentView('timer');
+      }
+    };
+    decidePositiveTimer();
+  }, [remainingSeconds, isFocusRunning, isCountUp, focusSessionId]);
 
   const markTodoDone = (id: string) => {
     if (transitioning[id]) return;
@@ -1090,9 +1481,11 @@ const App: React.FC = () => {
                   )}
                   {isFocusView && (
                     <VoiceInput
-                      placeholder="今天要完成什么呢？"
+                      placeholder={focusTaskText ? "需要补充什么吗？" : "这次专注准备完成什么任务呢？"}
                       plusIcon={imgPlusMath}
                       audioIcon={imgAudioWave}
+                      onSubmit={handleFocusTextSubmit}
+                      onAudioClick={handleFocusAudioClick}
                     />
                   )}
                 </div>

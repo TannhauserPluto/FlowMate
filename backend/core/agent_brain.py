@@ -149,6 +149,38 @@ class AgentBrain:
         response = await self._call_qwen(messages, max_tokens=50)
         return response or self.prompts.get_encouragement_by_state(flow_state, work_minutes)
 
+    async def generate_focus_message(
+        self,
+        purpose: str,
+        task_text: str = "",
+        user_reply: str = "",
+        history: Optional[List[dict]] = None,
+    ) -> str:
+        """Generate friend-style messages for focus flow."""
+        system_prompt = (
+            "你是用户的朋友式专注伙伴，语气亲切、简短、像朋友说话。"
+            "回答尽量控制在20字以内，不要使用感叹号。"
+        )
+        user_content = f"场景: {purpose}\n任务: {task_text}\n用户回答: {user_reply}\n请生成一句话回应。"
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history[-6:])
+        messages.append({"role": "user", "content": user_content})
+
+        response = await self._call_qwen(messages, max_tokens=60)
+        if response:
+            return response.strip().splitlines()[0]
+
+        fallback = {
+            "ask_task": "你这次想完成什么任务呢",
+            "encourage": "好的，我们一起加油",
+            "ask_rest": "我看你有点疲惫，要不要休息一下",
+            "continue": "好的，但不要太勉强自己",
+            "shorten": "我帮你缩短了时间，休息更有效",
+            "end_focus": "那我们先休息五分钟吧",
+        }
+        return fallback.get(purpose, "我会一直陪着你")
+
     async def chat(self, message: str, context: Optional[str] = None) -> str:
         """闲聊对话"""
         # MVP: 简单的关键词响应
