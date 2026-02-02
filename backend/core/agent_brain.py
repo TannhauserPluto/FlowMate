@@ -1,7 +1,6 @@
-"""
+'''
 FlowMate-Echo Agent Brain
-决策中枢 - 基于 Qwen-Max 的 AI 大脑 (MVP 版本)
-"""
+'''
 
 import json
 import os
@@ -12,18 +11,17 @@ from .prompt_templates import PromptTemplates
 
 
 class AgentBrain:
-    """AI 决策中枢"""
+    '''AI decision brain'''
 
     def __init__(self):
         self.api_key = settings.DASHSCOPE_API_KEY
         self.model = settings.QWEN_MAX_MODEL
         self.base_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
         self.prompts = PromptTemplates()
-        # MVP: 启用预制响应 (演示用)
+        # Use preset replies for demo when enabled
         self.use_preset = os.getenv("FLOWMATE_USE_PRESET", "false").lower() == "true"
 
     async def _call_qwen(self, messages: List[dict], max_tokens: int = 1024) -> Optional[str]:
-        """调用 Qwen-Max API"""
         if not self.api_key or self.api_key == "your_dashscope_api_key_here":
             return None
 
@@ -57,20 +55,13 @@ class AgentBrain:
             return None
 
     def _get_preset_tasks(self, task_description: str) -> List[str]:
-        """获取预制任务响应 (MVP 演示用)"""
         task_lower = task_description.lower().strip()
-        
-        # 查找匹配的预制响应
         for key, value in self.prompts.PRESET_TASK_RESPONSES.items():
             if key in task_lower or task_lower in key:
                 return value["steps"]
-        
-        # 默认响应
         return self.prompts.PRESET_TASK_RESPONSES["default"]["steps"]
 
     async def generate_task_breakdown(self, task_description: str) -> List[str]:
-        """生成任务拆解"""
-        # MVP: 优先使用预制响应
         if self.use_preset:
             preset = self._get_preset_tasks(task_description)
             if preset:
@@ -82,22 +73,18 @@ class AgentBrain:
         ]
 
         response = await self._call_qwen(messages, max_tokens=200)
-        
         if response:
-            # 尝试解析 JSON
             try:
-                # 提取 JSON 部分
                 json_start = response.find("{")
                 json_end = response.rfind("}") + 1
                 if json_start >= 0 and json_end > json_start:
                     json_str = response[json_start:json_end]
                     data = json.loads(json_str)
                     if "steps" in data and isinstance(data["steps"], list):
-                        return data["steps"][:3]  # 确保只返回 3 个步骤
+                        return data["steps"][:3]
             except json.JSONDecodeError:
                 pass
-            
-            # 回退：解析普通文本
+
             tasks = []
             for line in response.strip().split("\n"):
                 line = line.strip()
@@ -108,21 +95,19 @@ class AgentBrain:
             if tasks:
                 return tasks[:3]
 
-        # 最终回退：仅在启用预制模式时使用
         if self.use_preset:
             return self._get_preset_tasks(task_description)
         raise RuntimeError("LLM task breakdown unavailable")
 
     async def generate_task_topic(self, task_description: str, steps: List[str]) -> str:
-        """Generate a short topic for the task (<= 8 chars)."""
         messages = [
             {
                 "role": "system",
-                "content": "你是任务标题生成器，只输出一个不超过8个中文字符的主题短语，不要解释。",
+                "content": "??????????????????8????????????????",
             },
             {
                 "role": "user",
-                "content": f"任务：{task_description}\n步骤：{steps}\n主题：",
+                "content": f"???{task_description}\n???{steps}\n???",
             },
         ]
         response = await self._call_qwen(messages, max_tokens=30)
@@ -130,17 +115,12 @@ class AgentBrain:
             return response.strip().splitlines()[0][:8]
         return ""
 
-    async def generate_encouragement(
-        self, flow_state: str, work_duration: int, fatigue_level: int
-    ) -> str:
-        """生成鼓励/提醒语"""
+    async def generate_encouragement(self, flow_state: str, work_duration: int, fatigue_level: int) -> str:
         work_minutes = work_duration // 60
-        
-        # MVP: 优先使用预制鼓励语
         if self.use_preset:
             return self.prompts.get_encouragement_by_state(flow_state, work_minutes)
 
-        context = f"状态:{flow_state} 工作:{work_minutes}分钟 疲劳:{fatigue_level}%"
+        context = f"??:{flow_state} ??:{work_minutes}?? ??:{fatigue_level}%"
         messages = [
             {"role": "system", "content": self.prompts.encouragement_system},
             {"role": "user", "content": context},
@@ -156,12 +136,11 @@ class AgentBrain:
         user_reply: str = "",
         history: Optional[List[dict]] = None,
     ) -> str:
-        """Generate friend-style messages for focus flow."""
         system_prompt = (
-            "你是用户的朋友式专注伙伴，语气亲切、简短、像朋友说话。"
-            "回答尽量控制在20字以内，不要使用感叹号。"
+            "???????????????????????????"
+            "???????30????????????"
         )
-        user_content = f"场景: {purpose}\n任务: {task_text}\n用户回答: {user_reply}\n请生成一句话回应。"
+        user_content = f"??: {purpose}\n??: {task_text}\n????: {user_reply}\n?????????"
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history[-6:])
@@ -172,46 +151,43 @@ class AgentBrain:
             return response.strip().splitlines()[0]
 
         fallback = {
-            "ask_task": "你这次想完成什么任务呢",
-            "encourage": "好的，我们一起加油",
-            "ask_rest": "我看你有点疲惫，要不要休息一下",
-            "continue": "好的，但不要太勉强自己",
-            "shorten": "我帮你缩短了时间，休息更有效",
-            "end_focus": "那我们先休息五分钟吧",
+            "ask_task": "???????????",
+            "encourage": "?????????",
+            "distracted": "??????????????????",
+            "ask_rest": "?????????????????",
+            "continue": "???????????",
+            "shorten": "??????????????",
+            "end_focus": "??????????",
         }
-        return fallback.get(purpose, "我会一直陪着你")
+        return fallback.get(purpose, "???????")
 
     async def chat(self, message: str, context: Optional[str] = None) -> str:
-        """闲聊对话"""
-        # MVP: 简单的关键词响应
         if self.use_preset:
             message_lower = message.lower()
-            if "卡" in message_lower or "难" in message_lower:
-                return "卡住了吗？先休息一下，换个思路"
-            if "累" in message_lower or "困" in message_lower:
-                return "累了就休息一下吧，我在这里等你"
-            if "你好" in message_lower or "hi" in message_lower:
-                return "你好呀，准备开始工作了吗"
-            if "谢" in message_lower:
-                return "不客气，继续加油"
+            if "?" in message_lower or "?" in message_lower:
+                return "???????????????"
+            if "?" in message_lower or "?" in message_lower:
+                return "???????????????"
+            if "??" in message_lower or "hi" in message_lower:
+                return "????????????"
+            if "?" in message_lower:
+                return "????????"
 
         messages = [{"role": "system", "content": self.prompts.chat_system}]
         if context:
-            messages.append({"role": "system", "content": f"上下文:{context}"})
+            messages.append({"role": "system", "content": f"???:{context}"})
         messages.append({"role": "user", "content": message})
 
         response = await self._call_qwen(messages, max_tokens=100)
-        return response or "我在这里陪着你"
+        return response or "???????"
 
     async def analyze_screen_content(self, analysis_result: str) -> dict:
-        """分析屏幕内容并给出建议"""
         messages = [
             {"role": "system", "content": self.prompts.screen_analysis_system},
             {"role": "user", "content": analysis_result},
         ]
 
         response = await self._call_qwen(messages, max_tokens=200)
-        
         if response:
             try:
                 json_start = response.find("{")
@@ -221,7 +197,6 @@ class AgentBrain:
             except json.JSONDecodeError:
                 pass
 
-        # 默认响应
         return {
             "app": "unknown",
             "is_working": True,
@@ -230,9 +205,7 @@ class AgentBrain:
         }
 
     def set_preset_mode(self, enabled: bool):
-        """设置预制响应模式"""
         self.use_preset = enabled
 
 
-# 全局实例
 agent_brain = AgentBrain()

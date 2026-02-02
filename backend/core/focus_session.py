@@ -95,8 +95,12 @@ class FocusSessionManager:
         session = self.get(session_id)
         if not session:
             return False
-        return bool(session.last_screen_focused) and bool(session.last_fatigue_ok)
+        # Allow positive timer if screen is focused or unknown, and fatigue is ok or unknown.
+        if session.last_screen_focused is False:
+            return False
+        if session.last_fatigue_ok is False:
+            return False
+        return True
 
 
 focus_session_manager = FocusSessionManager()
-

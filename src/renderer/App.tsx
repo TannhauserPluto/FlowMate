@@ -532,6 +532,9 @@ const App: React.FC = () => {
         });
         if (!response.ok) return;
         const data = await response.json();
+        if (data?.audio?.base64) {
+          playAudioFromBase64(data.audio.base64, data.audio.format);
+        }
         const nextInterval = Number(data?.next_interval_seconds ?? 480) * 1000;
         scheduleScreenCheck(nextInterval);
       } catch (error) {

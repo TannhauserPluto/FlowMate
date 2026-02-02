@@ -42,6 +42,8 @@ class ScreenCheckResponse(BaseModel):
     suggestion: str
     next_interval_seconds: int
     consecutive_distract: int
+    reply: Optional[str] = None
+    audio: Optional[dict] = None
 
 
 class FatigueCheckRequest(BaseModel):
@@ -131,6 +133,21 @@ async def screen_check(request: ScreenCheckRequest):
         f"[Focus] screen-check result focused={is_focused} score={result.get('score')} "
         f"next={next_interval}s consecutive_distract={session.consecutive_distract}"
     )
+    reply = None
+    audio_payload = None
+    if not is_focused and session.consecutive_distract >= 2:
+        reply = await agent_brain.generate_focus_message(
+            "distracted",
+            task_text=task_text,
+            history=session.memory,
+        )
+        focus_session_manager.record_message(session.id, "assistant", reply)
+        audio = await audio_service.speak(reply, "neutral")
+        audio_payload = {
+            "base64": audio.get("audio_data", ""),
+            "format": audio.get("format", "mp3"),
+        }
+
     return ScreenCheckResponse(
         is_focused=is_focused,
         score=int(result.get("score", 50)),
@@ -138,6 +155,8 @@ async def screen_check(request: ScreenCheckRequest):
         suggestion=result.get("suggestion", ""),
         next_interval_seconds=next_interval,
         consecutive_distract=session.consecutive_distract,
+        reply=reply,
+        audio=audio_payload,
     )
 
 
