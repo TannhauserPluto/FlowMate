@@ -1053,6 +1053,52 @@ body {
   z-index: 1;
 }
 
+.voice-action.is-recording::before {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  opacity: 0;
+  animation: voice-record-pulse 1.2s ease-out infinite;
+}
+
+.voice-action.is-recording .voice-action-bg {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.voice-action.is-recording {
+  box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.25);
+  animation: voice-record-glow 1.2s ease-in-out infinite;
+}
+
+@keyframes voice-record-pulse {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.85);
+  }
+  70% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
+@keyframes voice-record-glow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.25);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 10px rgba(255, 255, 255, 0);
+  }
+}
+
 .ui-scale {
   width: 985.766px;
   height: 554.493px;
@@ -1547,6 +1593,17 @@ body {
   opacity: 0.92;
 }
 
+.window.is-break-view .left-pane,
+.window.is-break-view .right-pane,
+.window.is-break-view .task-panel {
+  pointer-events: none;
+}
+
+.window.is-break-view .task-panel {
+  opacity: 0;
+  visibility: hidden;
+}
+
 .window.is-task-running .todo-meta {
   display: flex;
   justify-content: space-between;
@@ -1758,6 +1815,42 @@ body {
   z-index: 6;
   pointer-events: auto;
   -webkit-app-region: no-drag;
+}
+
+.break-star-field {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.break-star-field img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.9;
+  animation: break-star-blink 2.4s ease-in-out infinite;
+}
+
+@keyframes break-star-blink {
+  0% {
+    opacity: 0.45;
+    transform: scale(0.98);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
+  100% {
+    opacity: 0.45;
+    transform: scale(0.98);
+  }
 }
 
 .time-wheel {

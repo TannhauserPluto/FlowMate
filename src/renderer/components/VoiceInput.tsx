@@ -4,6 +4,7 @@ type VoiceInputProps = {
   placeholder: string;
   plusIcon: string;
   audioIcon: string;
+  isRecording?: boolean;
   onActivate?: () => void;
   onFocusCapture?: () => void;
   onSubmit?: (value: string) => void;
@@ -11,7 +12,7 @@ type VoiceInputProps = {
 };
 
 const VoiceInput = forwardRef<HTMLInputElement, VoiceInputProps>(
-  ({ placeholder, plusIcon, audioIcon, onActivate, onFocusCapture, onSubmit, onAudioClick }, ref) => {
+  ({ placeholder, plusIcon, audioIcon, isRecording = false, onActivate, onFocusCapture, onSubmit, onAudioClick }, ref) => {
     const localRef = useRef<HTMLInputElement | null>(null);
     const inputRef = (ref as React.MutableRefObject<HTMLInputElement | null>) ?? localRef;
 
@@ -54,7 +55,12 @@ const VoiceInput = forwardRef<HTMLInputElement, VoiceInputProps>(
           onFocus={onFocusCapture}
           onKeyDown={handleKeyDown}
         />
-        <button className="voice-action" type="button" aria-label="Speak" onClick={handleAudioClick}>
+        <button
+          className={`voice-action ${isRecording ? 'is-recording' : ''}`}
+          type="button"
+          aria-label="Speak"
+          onClick={handleAudioClick}
+        >
           <span className="voice-action-bg" aria-hidden="true" />
           <img src={audioIcon} alt="" />
         </button>

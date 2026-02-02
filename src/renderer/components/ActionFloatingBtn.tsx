@@ -1,11 +1,12 @@
 import React from 'react';
 
 type ActionFloatingBtnProps = {
-  currentView: 'home' | 'task' | 'timer' | 'focus';
+  currentView: 'home' | 'task' | 'timer' | 'focus' | 'break';
   onGoToTimerConfig: () => void;
   onStartWork: () => void;
   onPause: () => void;
   onEnd: () => void;
+  onBreakEnd: () => void;
   isFocusRunning: boolean;
 };
 
@@ -15,15 +16,34 @@ const ActionFloatingBtn: React.FC<ActionFloatingBtnProps> = ({
   onStartWork,
   onPause,
   onEnd,
+  onBreakEnd,
   isFocusRunning,
 }) => {
   const isHome = currentView === 'home';
   const isFocus = currentView === 'focus';
-  const label = isHome ? '番茄钟' : '开始工作';
+  const label = isHome ? '\u756a\u8304\u949f' : '\u5f00\u59cb\u5de5\u4f5c';
   const handleClick = isHome ? onGoToTimerConfig : onStartWork;
 
+  if (currentView === 'break') {
+    return (
+      <button
+        type="button"
+        className="action-fab glass-widget glass-widget--border glass-widget-surface"
+        onClick={onBreakEnd}
+        aria-label="\u7ed3\u675f"
+      >
+        <span className="action-fab__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="presentation">
+            <rect x="6.5" y="6.5" width="11" height="11" rx="1.6" fill="currentColor" />
+          </svg>
+        </span>
+        <span className="action-fab__label">{'\u7ed3\u675f'}</span>
+      </button>
+    );
+  }
+
   if (isFocus) {
-    const pauseLabel = isFocusRunning ? '暂停' : '继续';
+    const pauseLabel = isFocusRunning ? '\u6682\u505c' : '\u7ee7\u7eed';
     return (
       <div className="action-fab-group" role="group" aria-label="Focus controls">
         <button
@@ -40,10 +60,7 @@ const ActionFloatingBtn: React.FC<ActionFloatingBtnProps> = ({
               </svg>
             ) : (
               <svg viewBox="0 0 24 24" role="presentation">
-                <path
-                  d="M7.5 5.5l11 6.5-11 6.5V5.5z"
-                  fill="currentColor"
-                />
+                <path d="M7.5 5.5l11 6.5-11 6.5V5.5z" fill="currentColor" />
               </svg>
             )}
           </span>
@@ -53,7 +70,7 @@ const ActionFloatingBtn: React.FC<ActionFloatingBtnProps> = ({
           type="button"
           className="action-fab glass-widget glass-widget--border glass-widget-surface"
           onClick={onEnd}
-          aria-label="结束"
+          aria-label="\u7ed3\u675f"
         >
           <span className="action-fab__icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" role="presentation">
@@ -66,7 +83,7 @@ const ActionFloatingBtn: React.FC<ActionFloatingBtnProps> = ({
               />
             </svg>
           </span>
-          <span className="action-fab__label">结束</span>
+          <span className="action-fab__label">{'\u7ed3\u675f'}</span>
         </button>
       </div>
     );

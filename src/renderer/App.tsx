@@ -9,6 +9,7 @@ import imgMute from './assets/figma/mute.png';
 import imgInnerBg from './assets/figma/inner-bg.png';
 import imgNavAvatar from './assets/figma/nav-avatar.png';
 import imgInnerBgTask from './assets/figma/inner-bg-task.png';
+import imgStarBlink from './assets/figma/starblink.png';
 import TimeWheelPicker, { TimeWheelValue } from './components/TimeWheelPicker';
 import imgStars from './assets/figma/star.png';
 import imgJourneyLineGraph from './assets/figma/journey-line-graph.png';
@@ -19,7 +20,7 @@ import starLv3 from './assets/star/stat-lv3.png';
 import starLv4 from './assets/star/star-lv4.png';
 
 
-type View = 'home' | 'task' | 'timer' | 'focus' | 'profile';
+type View = 'home' | 'task' | 'timer' | 'focus' | 'break' | 'profile';
 type ProfileTab = 'day' | 'month' | 'year';
 type PrimaryView = Exclude<View, 'profile'>;
 
@@ -45,6 +46,21 @@ type TaskMessage = {
   role: 'user' | 'assistant';
   text: string;
 };
+
+const DEFAULT_CHAT_USER_TEXT = '我需要写一篇关于数字媒体交互的论文';
+const DEFAULT_CHAT_ASSISTANT_TEXT =
+  '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list';
+const DEFAULT_TASK_TITLE = '数字媒体论文';
+const DEFAULT_TODO_TEXTS = [
+  '明确论文基本信息',
+  '头脑风暴 3–5 个可写选题',
+  '搜索并筛选文献',
+];
+const BREAK_DEFAULT_SECONDS = 5 * 60;
+const BREAK_DEFAULT_MESSAGE = '恭喜你完成专注，休息五分钟吧';
+const createBoardId = () => `board-${Date.now()}`;
+const buildDefaultTodos = (seed = Date.now()) =>
+  DEFAULT_TODO_TEXTS.map((text, index) => ({ id: `todo-${seed}-${index}`, text }));
 
 const STAR_LEVELS = '32234312210322320'.split('').map((value) => Number.parseInt(value, 10));
 const STAR_LEVEL_IMAGES = [starLv0, starLv1, starLv2, starLv3, starLv4];
@@ -110,12 +126,10 @@ const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<View>('home');
   const [profileTab, setProfileTab] = useState<ProfileTab>('day');
   const [encouragement, setEncouragement] = useState('让我来拆解你的任务吧～');
-  const [chatUserText, setChatUserText] = useState('我需要写一篇关于数字媒体交互的论文');
-  const [chatAssistantText, setChatAssistantText] = useState(
-    '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list',
-  );
-  const initialBoardIdRef = useRef(`board-${Date.now()}`);
-  const [taskTitle, setTaskTitle] = useState('数字媒体论文');
+  const [chatUserText, setChatUserText] = useState(DEFAULT_CHAT_USER_TEXT);
+  const [chatAssistantText, setChatAssistantText] = useState(DEFAULT_CHAT_ASSISTANT_TEXT);
+  const initialBoardIdRef = useRef(createBoardId());
+  const [taskTitle, setTaskTitle] = useState(DEFAULT_TASK_TITLE);
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [isInitialTaskLocked, setIsInitialTaskLocked] = useState(false);
   const [taskDate, setTaskDate] = useState(getBeijingDate());
@@ -128,7 +142,8 @@ const App: React.FC = () => {
   const primaryView: PrimaryView = currentView === 'profile' ? returnViewRef.current : currentView;
   const isTaskRunning = primaryView === 'task';
   const isFocusView = primaryView === 'focus';
-  const isTimerView = primaryView === 'timer' || isFocusView;
+  const isBreakView = primaryView === 'break';
+  const isTimerView = primaryView === 'timer' || isFocusView || isBreakView;
   const isHomeView = primaryView === 'home';
   const [isFocusRunning, setIsFocusRunning] = useState(false);
   const [isCountUp, setIsCountUp] = useState(false);
@@ -136,6 +151,9 @@ const App: React.FC = () => {
   const [focusTaskText, setFocusTaskText] = useState('');
   const [focusPrompt, setFocusPrompt] = useState('');
   const [isAwaitingRestDecision, setIsAwaitingRestDecision] = useState(false);
+  const [breakRemainingSeconds, setBreakRemainingSeconds] = useState(BREAK_DEFAULT_SECONDS);
+  const [breakMessage, setBreakMessage] = useState(BREAK_DEFAULT_MESSAGE);
+  const breakTimerRef = useRef<number | null>(null);
   const focusSessionIdRef = useRef<string | null>(null);
   const focusTaskTextRef = useRef('');
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -162,11 +180,7 @@ const App: React.FC = () => {
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
 
-  const [todoItems, setTodoItems] = useState<TodoItem[]>([
-    { id: 'todo-1', text: '明确论文基本信息' },
-    { id: 'todo-2', text: '头脑风暴 3–5 个可写选题' },
-    { id: 'todo-3', text: '搜索并筛选文献' },
-  ]);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>(() => buildDefaultTodos());
   const [doneItems, setDoneItems] = useState<TodoItem[]>([]);
   const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
   const [archivedTransitions, setArchivedTransitions] = useState<Record<string, 'toDone' | 'toTodo'>>({});
@@ -337,6 +351,65 @@ const App: React.FC = () => {
     setCurrentView('timer');
   };
 
+  const resetSessionState = () => {
+    const newBoardId = createBoardId();
+    initialBoardIdRef.current = newBoardId;
+    setChatUserText(DEFAULT_CHAT_USER_TEXT);
+    setChatAssistantText(DEFAULT_CHAT_ASSISTANT_TEXT);
+    setTaskTitle(DEFAULT_TASK_TITLE);
+    setTaskMessages([]);
+    setIsInitialTaskLocked(false);
+    setTaskDate(getBeijingDate());
+    setTaskBoards([]);
+    setActiveBoardId(newBoardId);
+    setTaskTimeline([{ type: 'board', id: newBoardId }]);
+    setTodoItems(buildDefaultTodos());
+    setDoneItems([]);
+    setTransitioning({});
+    setArchivedTransitions({});
+    setFocusSessionId(null);
+    setFocusTaskText('');
+    setFocusPrompt('');
+    setIsAwaitingRestDecision(false);
+    setIsFocusRunning(false);
+    setIsCountUp(false);
+    setRemainingSeconds(toTotalSeconds(timerValue));
+    finishRequestedRef.current = false;
+  };
+
+  const enterBreakView = (message?: string) => {
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    resetFocusMonitors();
+    setIsFocusRunning(false);
+    setIsCountUp(false);
+    finishRequestedRef.current = false;
+    setFocusSessionId(null);
+    setFocusTaskText('');
+    setIsAwaitingRestDecision(false);
+    const nextMessage = message ?? BREAK_DEFAULT_MESSAGE;
+    setBreakMessage(nextMessage);
+    setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
+    setCurrentView('break');
+    speakText(nextMessage);
+  };
+
+  const finishBreak = () => {
+    if (breakTimerRef.current) {
+      window.clearInterval(breakTimerRef.current);
+      breakTimerRef.current = null;
+    }
+    resetSessionState();
+    setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
+    setCurrentView('home');
+  };
+
+  const handleSkipBreak = () => {
+    finishBreak();
+  };
+
   const handleStartFocus = async () => {
     try {
       await ensureScreenStream();
@@ -382,18 +455,7 @@ const App: React.FC = () => {
   };
 
   const handleEndFocus = () => {
-    if (countdownRef.current) {
-      window.clearInterval(countdownRef.current);
-      countdownRef.current = null;
-    }
-    setIsFocusRunning(false);
-    setIsCountUp(false);
-    finishRequestedRef.current = false;
-    resetFocusMonitors();
-    setFocusSessionId(null);
-    setFocusTaskText('');
-    setIsAwaitingRestDecision(false);
-    setCurrentView('timer');
+    enterBreakView();
   };
 
   const handleWindowMinimize = () => {
@@ -411,6 +473,22 @@ const App: React.FC = () => {
       audioPlayerRef.current.volume = 1;
     }
     return audioPlayerRef.current;
+  };
+
+  const speakText = async (text: string) => {
+    if (!text) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/interaction/speak`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, emotion: 'neutral' }),
+      });
+      if (!response.ok) return;
+      const payload = await response.json();
+      playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+    } catch {
+      // ignore speak errors
+    }
   };
 
   const playAudioFromBase64 = async (base64?: string, format?: string) => {
@@ -1158,41 +1236,52 @@ const App: React.FC = () => {
   }, [isFocusRunning, isCountUp]);
 
   useEffect(() => {
+    if (!isBreakView) return;
+    if (breakTimerRef.current) {
+      window.clearInterval(breakTimerRef.current);
+      breakTimerRef.current = null;
+    }
+    breakTimerRef.current = window.setInterval(() => {
+      setBreakRemainingSeconds((prev) => {
+        if (prev <= 1) {
+          window.setTimeout(() => finishBreak(), 0);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (breakTimerRef.current) {
+        window.clearInterval(breakTimerRef.current);
+        breakTimerRef.current = null;
+      }
+    };
+  }, [isBreakView]);
+
+  useEffect(() => {
     if (!isFocusRunning || isCountUp) return;
     if (remainingSeconds !== 0) return;
     if (finishRequestedRef.current) return;
     finishRequestedRef.current = true;
-    const decidePositiveTimer = async () => {
+    const finishFocus = async () => {
       if (!focusSessionId) {
-        setIsFocusRunning(false);
-        setCurrentView('timer');
+        enterBreakView();
         return;
       }
       try {
-        const response = await fetch(`${API_BASE}/api/focus/finish`, {
+        await fetch(`${API_BASE}/api/focus/finish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: focusSessionId }),
         });
-        if (!response.ok) {
-          setIsFocusRunning(false);
-          setCurrentView('timer');
-          return;
-        }
-        const data = await response.json();
-        if (data?.start_positive_timer) {
-          setIsCountUp(true);
-          setIsFocusRunning(true);
-        } else {
-          setIsFocusRunning(false);
-          setCurrentView('timer');
-        }
       } catch {
-        setIsFocusRunning(false);
-        setCurrentView('timer');
+        // ignore finish errors
+      } finally {
+        enterBreakView();
       }
     };
-    decidePositiveTimer();
+    finishFocus();
   }, [remainingSeconds, isFocusRunning, isCountUp, focusSessionId]);
 
   const markTodoDone = (id: string) => {
@@ -1233,13 +1322,14 @@ const App: React.FC = () => {
 
 
   const focusValue = useMemo(() => toTimeWheelValue(remainingSeconds), [remainingSeconds]);
+  const breakValue = useMemo(() => toTimeWheelValue(breakRemainingSeconds), [breakRemainingSeconds]);
 
   return (
     <div className="app-shell">
       <div className={`app-layout ${currentView === 'profile' ? 'is-profile' : ''}`}>
         <UiScaleFrame>
           <div
-            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''}`}
+            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${isBreakView ? 'is-break-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''}`}
             data-name="Window"
             data-node-id="240:213"
           >
@@ -1435,6 +1525,11 @@ const App: React.FC = () => {
               <div className="inner-window" data-name="内窗" data-node-id="262:219">
                 <img className="inner-bg" src={imgInnerBg} alt="" />
                 <div className="inner-gradient" aria-hidden="true" />
+                {isBreakView && (
+                  <div className="break-star-field" aria-hidden="true">
+                    <img src={imgStarBlink} alt="" />
+                  </div>
+                )}
                 <div className="left-pane" data-name="左侧" data-node-id="262:230">
                   <div className="left-pane-bg" aria-hidden="true">
                     <img className="left-pane-bg-image" src={imgInnerBgTask} alt="" />
@@ -1459,13 +1554,13 @@ const App: React.FC = () => {
                 </div>
                 <div className="right-pane" data-name="右侧" data-node-id="262:220">
                   {isTimerView ? (
-                    <div className={`timer-countdown ${isFocusView ? 'is-running' : ''}`}>
+                    <div className={`timer-countdown ${isFocusView ? 'is-running' : ''} ${isBreakView ? 'is-break' : ''}`}>
                       <TimeWheelPicker
-                        value={isFocusView ? focusValue : timerValue}
-                        onChange={isFocusView ? undefined : setTimerValue}
-                        interactive={!isFocusView}
-                        animate={isFocusView}
-                        size={isFocusView ? TIMER_WHEEL_SIZE : undefined}
+                        value={isBreakView ? breakValue : isFocusView ? focusValue : timerValue}
+                        onChange={isFocusView || isBreakView ? undefined : setTimerValue}
+                        interactive={!isFocusView && !isBreakView}
+                        animate={isFocusView || isBreakView}
+                        size={isFocusView || isBreakView ? TIMER_WHEEL_SIZE : undefined}
                       />
                     </div>
                   ) : (
@@ -1477,6 +1572,7 @@ const App: React.FC = () => {
                         placeholder="今天要完成什么呢？"
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
+                        isRecording={isRecording}
                         onSubmit={isHomeView ? handleHomeTextSubmit : undefined}
                         onAudioClick={isHomeView ? handleHomeAudioClick : undefined}
                       />
@@ -1487,6 +1583,7 @@ const App: React.FC = () => {
                       placeholder={focusTaskText ? "需要补充什么吗？" : "这次专注准备完成什么任务呢？"}
                       plusIcon={imgPlusMath}
                       audioIcon={imgAudioWave}
+                      isRecording={isRecording}
                       onSubmit={handleFocusTextSubmit}
                       onAudioClick={handleFocusAudioClick}
                     />
@@ -1542,6 +1639,7 @@ const App: React.FC = () => {
                         placeholder="今天要完成什么呢？"
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
+                        isRecording={isRecording}
                         onSubmit={handleTaskInputSubmit}
                         onAudioClick={handleTaskAudioClick}
                       />
@@ -1558,6 +1656,7 @@ const App: React.FC = () => {
           onStartWork={handleStartFocus}
           onPause={handlePauseFocus}
           onEnd={handleEndFocus}
+          onBreakEnd={handleSkipBreak}
           isFocusRunning={isFocusRunning}
         />
       </div>
