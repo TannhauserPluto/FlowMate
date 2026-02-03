@@ -880,6 +880,7 @@ body {
   overflow: hidden;
 }
 
+
 .avatar-image {
   position: absolute;
   left: 87%;
@@ -887,19 +888,84 @@ body {
   width: 353.295px;
   height: 424.867px;
   transform: translateX(-50%);
+  --avatar-idle-left: -33.19%;
+  --avatar-idle-top: -10.39%;
+  --avatar-idle-width: 168.53%;
+  --avatar-idle-height: 140.06%;
+  --avatar-talk-left: -33.19%;
+  --avatar-talk-top: -10.39%;
+  --avatar-talk-width: 168.53%;
+  --avatar-talk-height: 140.06%;
+  --avatar-focus-left: -33.19%;
+  --avatar-focus-top: -10.39%;
+  --avatar-focus-width: 168.53%;
+  --avatar-focus-height: 140.06%;
+  --avatar-stretch-left: -33.19%;
+  --avatar-stretch-top: -10.39%;
+  --avatar-stretch-width: 168.53%;
+  --avatar-stretch-height: 140.06%;
 }
 
 .avatar-image img,
 .avatar-image video {
   position: absolute;
-  width: 168.53%;
-  height: 140.06%;
-  left: -33.19%;
-  top: -10.39%;
+  width: var(--avatar-idle-width);
+  height: var(--avatar-idle-height);
+  left: var(--avatar-idle-left);
+  top: var(--avatar-idle-top);
   object-fit: cover;
   display: block;
 }
 
+.avatar-image video[data-state='idle'] {
+  width: var(--avatar-idle-width);
+  height: var(--avatar-idle-height);
+  left: var(--avatar-idle-left);
+  top: var(--avatar-idle-top);
+}
+
+.avatar-image video[data-state='talk'] {
+  width: var(--avatar-talk-width);
+  height: var(--avatar-talk-height);
+  left: var(--avatar-talk-left);
+  top: var(--avatar-talk-top);
+}
+
+.avatar-image video[data-state='focus'] {
+  width: var(--avatar-focus-width);
+  height: var(--avatar-focus-height);
+  left: var(--avatar-focus-left);
+  top: var(--avatar-focus-top);
+}
+
+.avatar-image video[data-state='stretch'] {
+  width: var(--avatar-stretch-width);
+  height: var(--avatar-stretch-height);
+  left: var(--avatar-stretch-left);
+  top: var(--avatar-stretch-top);
+}
+
+.window.is-home-view .avatar-image {
+  --avatar-idle-left: -33.19%;
+  --avatar-idle-top: -10.39%;
+  --avatar-idle-width: 168.53%;
+  --avatar-idle-height: 140.06%;
+  --avatar-talk-left: -33.19%;
+  --avatar-talk-top: -10.39%;
+  --avatar-talk-width: 168.53%;
+  --avatar-talk-height: 140.06%;
+}
+
+.window.is-task-running .avatar-image {
+  --avatar-idle-left: -33.19%;
+  --avatar-idle-top: -10.39%;
+  --avatar-idle-width: 168.53%;
+  --avatar-idle-height: 140.06%;
+  --avatar-talk-left: -33.19%;
+  --avatar-talk-top: -10.39%;
+  --avatar-talk-width: 168.53%;
+  --avatar-talk-height: 140.06%;
+}
 .mute-button {
   position: absolute;
   left: 14.73px;
@@ -1275,8 +1341,8 @@ body {
 .window.is-task-running .avatar-image {
   width: 219.177px;
   height: 263.579px;
-  top: 197.97px;
-  left: 50%;
+  top: 130px;
+  left: 70%;
 }
 
 /* Task panel refined */

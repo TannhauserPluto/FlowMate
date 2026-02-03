@@ -1561,7 +1561,7 @@ const App: React.FC = () => {
       <div className={`app-layout ${currentView === 'profile' ? 'is-profile' : ''}`}>
         <UiScaleFrame>
           <div
-            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${isBreakView ? 'is-break-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''}`}
+            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${isBreakView ? 'is-break-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''} ${currentView === 'home' ? 'is-home-view' : ''}`}
             data-name="Window"
             data-node-id="240:213"
           >
