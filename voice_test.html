@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FlowMate Voice Test</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f7f7f7;
+        margin: 0;
+        padding: 24px;
+        color: #222;
+      }
+      .card {
+        max-width: 760px;
+        margin: 0 auto;
+        background: #fff;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 12px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .row > * {
+        flex: 1;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        color: #555;
+        margin-bottom: 6px;
+      }
+      input, textarea, select, button {
+        width: 100%;
+        padding: 10px;
+        font-size: 14px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        box-sizing: border-box;
+      }
+      textarea {
+        min-height: 80px;
+        resize: vertical;
+      }
+      button {
+        background: #111;
+        color: #fff;
+        border: none;
+        cursor: pointer;
+      }
+      button:disabled {
+        background: #888;
+        cursor: not-allowed;
+      }
+      .meta {
+        font-size: 12px;
+        color: #666;
+      }
+      .log {
+        background: #f2f2f2;
+        border-radius: 8px;
+        padding: 10px;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+      audio {
+        width: 100%;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>FlowMate Voice Test</h1>
+      <div class="row">
+        <div>
+          <label for="endpoint">API Endpoint</label>
+          <input id="endpoint" value="/api/interaction/speak" />
+        </div>
+        <div>
+          <label for="emotion">Emotion</label>
+          <select id="emotion">
+            <option value="neutral">neutral</option>
+            <option value="strict">strict</option>
+            <option value="encouraging">encouraging</option>
+            <option value="shush">shush</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="text">Text</label>
+          <textarea id="text">Stop zoning out. The thesis is not finished yet.</textarea>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="meta">
+          Note: Instruction is sent via SDK and is not spoken. Subtitle stays as original text.
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <button id="speakBtn">Speak</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="meta" id="meta"></div>
+      </div>
+
+      <audio id="audio" controls></audio>
+      <div class="log" id="log"></div>
+    </div>
+
+    <script>
+      const speakBtn = document.getElementById("speakBtn");
+      const endpointInput = document.getElementById("endpoint");
+      const emotionSelect = document.getElementById("emotion");
+      const textInput = document.getElementById("text");
+      const audioEl = document.getElementById("audio");
+      const logEl = document.getElementById("log");
+      const metaEl = document.getElementById("meta");
+
+      function base64ToBlob(base64, mime) {
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mime });
+      }
+
+      async function speak() {
+        speakBtn.disabled = true;
+        logEl.textContent = "";
+        metaEl.textContent = "Requesting...";
+        try {
+          const endpoint = endpointInput.value.trim();
+          const payload = {
+            text: textInput.value.trim(),
+            emotion: emotionSelect.value,
+          };
+
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text();
+            throw new Error(`HTTP ${res.status}: ${errText}`);
+          }
+
+          const data = await res.json();
+          logEl.textContent = JSON.stringify(data, null, 2);
+
+          const status = data?.status || "unknown";
+          const audio = data?.data?.audio;
+          const driver = data?.data?.driver;
+          const base64Len = audio?.base64 ? audio.base64.length : 0;
+          metaEl.textContent =
+            `status: ${status} | motion: ${driver?.motion_trigger || "-"} | expression: ${driver?.expression_trigger || "-"} | duration: ${audio?.estimated_duration_ms || 0}ms | base64: ${base64Len}`;
+
+          if (audio?.base64) {
+            const blob = base64ToBlob(audio.base64, "audio/mpeg");
+            const url = URL.createObjectURL(blob);
+            audioEl.src = url;
+            audioEl.play().catch(() => {});
+          } else {
+            audioEl.removeAttribute("src");
+          }
+        } catch (err) {
+          logEl.textContent = String(err);
+          metaEl.textContent = "Request failed";
+        } finally {
+          speakBtn.disabled = false;
+        }
+      }
+
+      speakBtn.addEventListener("click", speak);
+    </script>
+  </body>
+</html>
