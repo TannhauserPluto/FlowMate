@@ -947,11 +947,11 @@ body {
 
 .window.is-home-view .avatar-image {
   --avatar-idle-left: -33.19%;
-  --avatar-idle-top: -10.39%;
+  --avatar-idle-top: -30.39%;
   --avatar-idle-width: 168.53%;
   --avatar-idle-height: 140.06%;
-  --avatar-talk-left: -33.19%;
-  --avatar-talk-top: -10.39%;
+  --avatar-talk-left: -50%;
+  --avatar-talk-top: -6%;
   --avatar-talk-width: 168.53%;
   --avatar-talk-height: 140.06%;
 }
@@ -962,7 +962,7 @@ body {
   --avatar-idle-width: 168.53%;
   --avatar-idle-height: 140.06%;
   --avatar-talk-left: -33.19%;
-  --avatar-talk-top: -10.39%;
+  --avatar-talk-top: 10%;
   --avatar-talk-width: 168.53%;
   --avatar-talk-height: 140.06%;
 }
@@ -2029,4 +2029,35 @@ body {
 
 .window.is-task-running .countdown {
   pointer-events: auto;
+}
+
+.home-chat-bubble {
+  position: absolute;
+  left: 22px;
+  top: 18px;
+  max-width: 260px;
+  width: fit-content;
+  height: auto;
+  padding: 10px 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.home-chat-bubble.chat-bubble-user {
+  width: auto;
+  height: auto;
+  min-height: 32px;
+  mix-blend-mode: normal;
+}
+
+@supports (text-wrap: pretty) {
+  .home-chat-bubble {
+    text-wrap: pretty;
+  }
 }

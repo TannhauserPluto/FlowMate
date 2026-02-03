@@ -53,6 +53,8 @@ type TaskMessage = {
 const DEFAULT_CHAT_USER_TEXT = '我需要写一篇关于数字媒体交互的论文';
 const DEFAULT_CHAT_ASSISTANT_TEXT =
   '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list';
+const HOME_WELCOME_TEXT =
+  '你好呀，我是 FlowMate，你的心流维护小助手。你可以在输入框告诉我今天要完成的事，我会帮你拆解成待办；也可以点击麦克风直接说话。想进入专注计时就点下方的“番茄钟”，头像页可以查看进度。现在告诉我你的任务吧。';
 const DEFAULT_TASK_TITLE = '数字媒体论文';
 const DEFAULT_TODO_TEXTS = [
   '明确论文基本信息',
@@ -80,6 +82,85 @@ const sanitizeText = (text: string) =>
     .replace(/<Speech\|>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+const DEFAULT_BUBBLE_FONT =
+  "400 12.183px/1.6 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+const DEFAULT_BUBBLE_TEXT_WIDTH = 228;
+let bubbleMetricsCache: { font: string; maxTextWidth: number } | null = null;
+let measureContext: CanvasRenderingContext2D | null = null;
+
+const getTextMeasureContext = () => {
+  if (measureContext) return measureContext;
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  measureContext = canvas.getContext('2d');
+  return measureContext;
+};
+
+const getBubbleMetrics = () => {
+  if (bubbleMetricsCache) return bubbleMetricsCache;
+  if (typeof document === 'undefined' || !document.body) {
+    bubbleMetricsCache = {
+      font: DEFAULT_BUBBLE_FONT,
+      maxTextWidth: DEFAULT_BUBBLE_TEXT_WIDTH,
+    };
+    return bubbleMetricsCache;
+  }
+  const probe = document.createElement('span');
+  probe.className = 'home-chat-bubble chat-bubble';
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.pointerEvents = 'none';
+  probe.style.whiteSpace = 'pre';
+  probe.style.top = '-9999px';
+  probe.textContent = 'M';
+  document.body.appendChild(probe);
+  const style = window.getComputedStyle(probe);
+  const font = `${style.fontWeight} ${style.fontSize} / ${style.lineHeight} ${style.fontFamily}`;
+  const maxWidth = Number.parseFloat(style.maxWidth || '');
+  const paddingLeft = Number.parseFloat(style.paddingLeft || '');
+  const paddingRight = Number.parseFloat(style.paddingRight || '');
+  const padding = (Number.isFinite(paddingLeft) ? paddingLeft : 0)
+    + (Number.isFinite(paddingRight) ? paddingRight : 0);
+  const maxTextWidth = Number.isFinite(maxWidth) && maxWidth > 0
+    ? Math.max(0, maxWidth - padding)
+    : DEFAULT_BUBBLE_TEXT_WIDTH;
+  document.body.removeChild(probe);
+  bubbleMetricsCache = { font, maxTextWidth };
+  return bubbleMetricsCache;
+};
+
+const wrapLineByWidth = (
+  line: string,
+  maxWidth: number,
+  ctx: CanvasRenderingContext2D,
+) => {
+  if (!line) return [''];
+  const result: string[] = [];
+  let current = '';
+  for (const char of line) {
+    const next = current + char;
+    if (ctx.measureText(next).width > maxWidth && current) {
+      result.push(current);
+      current = char;
+    } else {
+      current = next;
+    }
+  }
+  if (current) result.push(current);
+  return result;
+};
+
+const wrapTextByWidth = (text: string) => {
+  if (!text) return '';
+  const ctx = getTextMeasureContext();
+  const { font, maxTextWidth } = getBubbleMetrics();
+  if (!ctx || !maxTextWidth) return text;
+  ctx.font = font;
+  return text
+    .split('\n')
+    .flatMap((line) => wrapLineByWidth(line, maxTextWidth, ctx))
+    .join('\n');
+};
 const safeJsonParse = <T,>(raw: string | null, fallback: T): T => {
   if (!raw) return fallback;
   try {
@@ -139,6 +220,8 @@ const App: React.FC = () => {
   const [encouragement, setEncouragement] = useState('让我来拆解你的任务吧～');
   const [chatUserText, setChatUserText] = useState(DEFAULT_CHAT_USER_TEXT);
   const [chatAssistantText, setChatAssistantText] = useState(DEFAULT_CHAT_ASSISTANT_TEXT);
+  const [homeChatBubble, setHomeChatBubble] = useState('');
+  const [speechBubbleText, setSpeechBubbleText] = useState('');
   const initialBoardIdRef = useRef(createBoardId());
   const [taskTitle, setTaskTitle] = useState(DEFAULT_TASK_TITLE);
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
@@ -530,8 +613,14 @@ const App: React.FC = () => {
     return audioPlayerRef.current;
   };
 
+  const setSpeechBubble = (text?: string) => {
+    if (!text) return;
+    setSpeechBubbleText(wrapTextByWidth(sanitizeText(text)));
+  };
+
   const speakText = async (text: string) => {
     if (!text) return;
+    setSpeechBubble(text);
     try {
       const response = await fetch(`${API_BASE}/interaction/speak`, {
         method: 'POST',
@@ -669,6 +758,9 @@ const App: React.FC = () => {
         });
         if (!response.ok) return;
         const data = await response.json();
+        if (data?.reply) {
+          setSpeechBubble(data.reply);
+        }
         if (data?.audio?.base64) {
           playAudioFromBase64(data.audio.base64, data.audio.format);
         }
@@ -700,12 +792,18 @@ const App: React.FC = () => {
         const data = await response.json();
         if (data?.action === 'ask_rest') {
           setIsAwaitingRestDecision(true);
+          if (data?.reply) {
+            setSpeechBubble(data.reply);
+          }
           if (data?.audio?.base64) {
             playAudioFromBase64(data.audio.base64, data.audio.format);
           }
         } else if (data?.action === 'shorten') {
           if (typeof data?.new_remaining_seconds === 'number') {
             setRemainingSeconds(data.new_remaining_seconds);
+          }
+          if (data?.reply) {
+            setSpeechBubble(data.reply);
           }
           if (data?.audio?.base64) {
             playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -728,6 +826,7 @@ const App: React.FC = () => {
       const data = await response.json();
       if (data?.prompt) {
         setFocusPrompt(data.prompt);
+        setSpeechBubble(data.prompt);
       }
       if (data?.audio?.base64) {
         playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -763,6 +862,7 @@ const App: React.FC = () => {
     setIsAwaitingRestDecision(false);
     if (data?.reply) {
       setFocusPrompt(data.reply);
+      setSpeechBubble(data.reply);
     }
     if (data?.audio?.base64) {
       playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -792,6 +892,9 @@ const App: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
+        if (data?.reply) {
+          setSpeechBubble(data.reply);
+        }
         if (data?.audio?.base64) {
           playAudioFromBase64(data.audio.base64, data.audio.format);
         }
@@ -885,7 +988,8 @@ const App: React.FC = () => {
   const applyInteraction = async (interaction: any, userText?: string) => {
     if (!interaction) return;
     const cleanedUserText = userText ? sanitizeText(userText) : '';
-    if (!isInitialTaskLocked) {
+    const isHomeChat = isHomeView && interaction.type === 'chat';
+    if (!isInitialTaskLocked && !isHomeChat) {
       if (userText) setChatUserText(cleanedUserText);
       if (interaction.audio_text) setChatAssistantText(sanitizeText(interaction.audio_text));
     }
@@ -910,6 +1014,13 @@ const App: React.FC = () => {
 
     if (interaction.type === 'chat') {
       const assistantText = sanitizeText(interaction.audio_text || '');
+      if (isHomeView) {
+        if (assistantText) {
+          setHomeChatBubble(wrapTextByWidth(assistantText));
+          void speakText(assistantText);
+        }
+        return;
+      }
       if (cleanedUserText) {
         setChatUserText(cleanedUserText);
         appendTaskMessage('user', cleanedUserText);
@@ -920,7 +1031,6 @@ const App: React.FC = () => {
         void speakText(assistantText);
       }
       setIsInitialTaskLocked(true);
-      setCurrentView('task');
       return;
     }
 
@@ -1304,6 +1414,12 @@ const App: React.FC = () => {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isHomeView || homeChatBubble) return;
+    setHomeChatBubble(wrapTextByWidth(HOME_WELCOME_TEXT));
+    void speakText(HOME_WELCOME_TEXT);
+  }, [isHomeView, homeChatBubble]);
 
   useEffect(() => {
     remainingSecondsRef.current = remainingSeconds;
@@ -1760,6 +1876,16 @@ const App: React.FC = () => {
                 {isBreakView && (
                   <div className="break-star-field" aria-hidden="true">
                     <img src={imgStarBlink} alt="" />
+                  </div>
+                )}
+                {isHomeView && homeChatBubble && (
+                  <div className="home-chat-bubble chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
+                    {homeChatBubble}
+                  </div>
+                )}
+                {isTimerView && isAvatarSpeaking && speechBubbleText && (
+                  <div className="home-chat-bubble chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
+                    {speechBubbleText}
                   </div>
                 )}
                 <div className="left-pane" data-name="左侧" data-node-id="262:230">
