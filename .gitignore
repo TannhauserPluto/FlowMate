@@ -1,0 +1,5 @@
+node_modules
+.env
+# Python 忽略规则
+__pycache__/
+*.pyc

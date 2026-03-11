@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlowMate Voice Pipeline Test</title>
+    <style>
+      :root {
+        --bg: #0f1318;
+        --panel: #171c22;
+        --text: #e7edf3;
+        --muted: #9fb0c0;
+        --accent: #5fd3a5;
+        --danger: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(1200px 800px at 20% 0%, #1b2633, var(--bg));
+        color: var(--text);
+        font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 32px auto;
+        padding: 20px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid #263141;
+        border-radius: 14px;
+        padding: 18px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 22px;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .row > * { flex: 1 1 240px; }
+      label {
+        font-size: 13px;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 6px;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #2a3545;
+        background: #12171e;
+        color: var(--text);
+      }
+      .status {
+        margin: 12px 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #11161d;
+        border: 1px solid #233040;
+        color: var(--muted);
+      }
+      .actions {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-top: 8px;
+      }
+      button {
+        padding: 12px 16px;
+        border-radius: 12px;
+        border: none;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        color: #071108;
+        background: var(--accent);
+      }
+      button.secondary {
+        background: #2b3646;
+        color: var(--text);
+      }
+      button.danger {
+        background: var(--danger);
+        color: #2b0505;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        background: #0f141b;
+        border: 1px solid #233040;
+        border-radius: 12px;
+        padding: 12px;
+        color: #cfe6ff;
+        font-size: 13px;
+      }
+      .bubble {
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: #111822;
+        border: 1px solid #223245;
+        margin-top: 10px;
+      }
+      .pill {
+        display: inline-block;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #202a36;
+        color: var(--muted);
+        font-size: 12px;
+        margin-right: 6px;
+      }
+      audio {
+        width: 100%;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>FlowMate Voice Pipeline Test</h1>
+        <div class="row">
+          <div>
+            <label for="apiBase">API Base URL</label>
+            <input id="apiBase" type="text" value="http://127.0.0.1:8000" />
+          </div>
+          <div>
+            <label for="context">Context (optional)</label>
+            <input id="context" type="text" placeholder="Optional context text" />
+          </div>
+        </div>
+
+        <div class="status" id="status">Idle</div>
+
+        <div class="actions">
+          <button id="recordBtn">Start Recording</button>
+          <button id="clearBtn" class="secondary">Clear</button>
+        </div>
+
+        <audio id="audioPlayer" controls></audio>
+
+        <div class="bubble" id="bubble">
+          <div class="pill" id="userEmotion">user: neutral</div>
+          <div class="pill" id="assistantEmotion">assistant: neutral</div>
+          <div id="subtitle">Waiting for response...</div>
+        </div>
+
+        <div class="mono" id="responseBox">No response yet.</div>
+      </div>
+    </div>
+
+    <script>
+      const recordBtn = document.getElementById("recordBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusEl = document.getElementById("status");
+      const audioPlayer = document.getElementById("audioPlayer");
+      const responseBox = document.getElementById("responseBox");
+      const apiBaseInput = document.getElementById("apiBase");
+      const contextInput = document.getElementById("context");
+      const subtitleEl = document.getElementById("subtitle");
+      const userEmotionEl = document.getElementById("userEmotion");
+      const assistantEmotionEl = document.getElementById("assistantEmotion");
+
+      let mediaRecorder = null;
+      let chunks = [];
+      let stream = null;
+      let recording = false;
+      let startTime = 0;
+      let timerId = null;
+
+      function setStatus(text, isError = false) {
+        statusEl.textContent = text;
+        statusEl.style.color = isError ? "#ffb3b3" : "#9fb0c0";
+      }
+
+      function updateTimer() {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        setStatus(`Recording... ${elapsed}s`);
+      }
+
+      async function startRecording() {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const options = { mimeType: "audio/webm;codecs=opus" };
+          const supported = MediaRecorder.isTypeSupported(options.mimeType);
+          mediaRecorder = new MediaRecorder(stream, supported ? options : undefined);
+          chunks = [];
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+              chunks.push(e.data);
+            }
+          };
+          mediaRecorder.onstop = () => {
+            const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+            sendToBackend(blob);
+          };
+          mediaRecorder.start();
+          recording = true;
+          recordBtn.textContent = "Stop Recording";
+          recordBtn.classList.add("danger");
+          startTime = Date.now();
+          timerId = setInterval(updateTimer, 500);
+          setStatus("Recording...");
+        } catch (err) {
+          setStatus(`Mic error: ${err.message || err}`, true);
+        }
+      }
+
+      function stopRecording() {
+        if (!mediaRecorder) return;
+        mediaRecorder.stop();
+        recording = false;
+        recordBtn.textContent = "Start Recording";
+        recordBtn.classList.remove("danger");
+        if (timerId) {
+          clearInterval(timerId);
+          timerId = null;
+        }
+        setStatus("Uploading...");
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+      }
+
+      async function sendToBackend(blob) {
+        const apiBase = apiBaseInput.value.trim().replace(/\/$/, "");
+        const url = `${apiBase}/api/interaction/voice`;
+        const form = new FormData();
+        const type = blob.type || "audio/webm";
+        const ext = type.includes("wav")
+          ? "wav"
+          : type.includes("ogg")
+          ? "ogg"
+          : type.includes("mp3")
+          ? "mp3"
+          : "webm";
+        form.append("audio", blob, `recording.${ext}`);
+        const contextValue = contextInput.value.trim();
+        if (contextValue) {
+          form.append("context", contextValue);
+        }
+
+        try {
+          const res = await fetch(url, { method: "POST", body: form });
+          const data = await res.json();
+          renderResponse(data);
+        } catch (err) {
+          setStatus(`Request error: ${err.message || err}`, true);
+        }
+      }
+
+      function renderResponse(payload) {
+        responseBox.textContent = JSON.stringify(payload, null, 2);
+        const status = payload.status || "unknown";
+        setStatus(`Response: ${status}`);
+
+        const userEmotion = payload?.data?.user?.emotion || "neutral";
+        const assistantEmotion = payload?.data?.assistant?.emotion || "neutral";
+        const subtitle = payload?.data?.driver?.subtitle || payload?.data?.assistant?.text || "";
+        userEmotionEl.textContent = `user: ${userEmotion}`;
+        assistantEmotionEl.textContent = `assistant: ${assistantEmotion}`;
+        subtitleEl.textContent = subtitle || "No subtitle";
+
+        const audioB64 = payload?.data?.audio?.base64 || "";
+        if (audioB64) {
+          audioPlayer.src = `data:audio/mpeg;base64,${audioB64}`;
+          audioPlayer.play().catch(() => {});
+        } else {
+          audioPlayer.removeAttribute("src");
+          audioPlayer.load();
+        }
+      }
+
+      recordBtn.addEventListener("click", () => {
+        if (recording) stopRecording();
+        else startRecording();
+      });
+
+      clearBtn.addEventListener("click", () => {
+        responseBox.textContent = "No response yet.";
+        subtitleEl.textContent = "Waiting for response...";
+        userEmotionEl.textContent = "user: neutral";
+        assistantEmotionEl.textContent = "assistant: neutral";
+        setStatus("Idle");
+        audioPlayer.removeAttribute("src");
+        audioPlayer.load();
+      });
+    </script>
+  </body>
+</html>

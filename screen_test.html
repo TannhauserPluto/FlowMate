@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>FlowMate 屏幕审计测试</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #1e1e1e; color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .container { width: 90%; max-width: 800px; }
+        
+        /* 控制面板 */
+        .controls { background: #2d2d2d; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #3d3d3d; }
+        input[type="text"] { width: 300px; padding: 10px; border-radius: 5px; border: none; margin-right: 10px; }
+        button { padding: 10px 20px; cursor: pointer; border-radius: 5px; border: none; font-weight: bold; transition: 0.2s; }
+        .btn-start { background: #0078d4; color: white; }
+        .btn-start:hover { background: #0063b1; }
+        .btn-audit { background: #107c10; color: white; }
+        .btn-audit:disabled { background: #555; cursor: not-allowed; }
+
+        /* 预览区 */
+        .preview-area { display: flex; gap: 20px; margin-bottom: 20px; }
+        .video-box, .result-box { flex: 1; background: #252526; padding: 10px; border-radius: 8px; border: 1px solid #333; }
+        video { width: 100%; border-radius: 4px; display: block; }
+        pre { white-space: pre-wrap; word-wrap: break-word; color: #9cdcfe; font-family: 'Consolas', monospace; font-size: 14px; }
+        
+        .status-badge { display: inline-block; padding: 5px 10px; border-radius: 4px; font-size: 12px; margin-bottom: 10px; }
+        .focused { background: #107c10; }
+        .distracted { background: #c50f1f; }
+        
+        h3 { margin-top: 0; color: #ccc; border-bottom: 1px solid #444; padding-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🖥️ 屏幕专注度测试 (Backend Test)</h1>
+
+    <div class="controls">
+        <div style="margin-bottom: 15px;">
+            <label>当前任务目标：</label>
+            <input type="text" id="taskInput" value="编写初期报告" placeholder="输入你正在做的任务...">
+        </div>
+        <div>
+            <button class="btn-start" onclick="startScreenShare()">1. 选择要监控的屏幕</button>
+            <button class="btn-audit" id="auditBtn" onclick="captureAndAudit()" disabled>2. 发送截图进行审计</button>
+        </div>
+    </div>
+
+    <div class="preview-area">
+        <div class="video-box">
+            <h3>本地屏幕预览</h3>
+            <video id="screenVideo" autoplay muted></video>
+        </div>
+
+        <div class="result-box">
+            <h3>Qwen-VL 分析结果</h3>
+            <div id="loading" style="display:none; color: #ebac00;">⏳ 分析中... (大模型可能需要 3-5 秒)</div>
+            <div id="resultOutput">等待发送...</div>
+        </div>
+    </div>
+    
+    <canvas id="captureCanvas" style="display:none;"></canvas>
+</div>
+
+<script>
+    const video = document.getElementById('screenVideo');
+    const canvas = document.getElementById('captureCanvas');
+    const auditBtn = document.getElementById('auditBtn');
+    const resultOutput = document.getElementById('resultOutput');
+    const loading = document.getElementById('loading');
+
+    // 1. 启动屏幕共享
+    async function startScreenShare() {
+        try {
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: { cursor: "always" },
+                audio: false
+            });
+            video.srcObject = stream;
+            auditBtn.disabled = false;
+            resultOutput.innerHTML = "✅ 屏幕已获取，请点击“发送截图”测试后端。";
+        } catch (err) {
+            console.error("Error: " + err);
+            alert("无法获取屏幕权限，请使用 Chrome/Edge 并允许分享。");
+        }
+    }
+
+    // 2. 截图并发送给后端
+    async function captureAndAudit() {
+        if (!video.srcObject) return;
+
+        // UI 状态更新
+        auditBtn.disabled = true;
+        loading.style.display = 'block';
+        resultOutput.innerHTML = "";
+
+        // 在 Canvas 上画一帧
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // 转 Base64
+        const base64Image = canvas.toDataURL('image/jpeg', 0.8);
+        const task = document.getElementById('taskInput').value;
+
+        try {
+            // 发送请求 (注意：根据你的路由调整 URL，例如 /api/brain/audit/screen)
+            // 假设你在 main.py 里注册 router 时没有前缀，或者前缀是 /api/brain
+            // 这里尝试最可能的路径，如果不通请看 F12 网络面板
+            const response = await fetch('http://127.0.0.1:8000/api/brain/audit/screen', { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    image: base64Image,
+                    current_task: task
+                })
+            });
+
+            const data = await response.json();
+            displayResult(data);
+
+        } catch (error) {
+            resultOutput.innerHTML = `<span style="color:#f48771">❌ 请求失败: ${error.message}</span><br><small>请检查后端是否运行，端口是否为 8000</small>`;
+        } finally {
+            auditBtn.disabled = false;
+            loading.style.display = 'none';
+        }
+    }
+
+    // 3. 显示结果
+    function displayResult(data) {
+        const badgeClass = data.is_focused ? 'focused' : 'distracted';
+        const badgeText = data.is_focused ? '专注中' : '分心了';
+        
+        // 格式化 JSON 显示
+        const jsonStr = JSON.stringify(data, null, 2);
+        
+        resultOutput.innerHTML = `
+            <div class="status-badge ${badgeClass}">${badgeText} (分数: ${data.score})</div>
+            <div style="margin-bottom: 10px;"><strong>AI 分析:</strong> ${data.analysis}</div>
+            <div style="margin-bottom: 10px; color: #aaa;"><strong>建议:</strong> ${data.suggestion}</div>
+            <hr style="border-color:#444">
+            <pre>${jsonStr}</pre>
+        `;
+    }
+</script>
+
+</body>
+</html>

@@ -1,0 +1,194 @@
+﻿<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FlowMate Voice Single Input Test</title>
+    <style>
+      :root {
+        --bg: #0f1318;
+        --panel: #171c22;
+        --text: #e7edf3;
+        --muted: #9fb0c0;
+        --accent: #5fd3a5;
+        --danger: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: radial-gradient(1200px 800px at 20% 0%, #1b2633, var(--bg));
+        color: var(--text);
+        font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+      }
+      .wrap { max-width: 720px; margin: 28px auto; padding: 20px; }
+      .card {
+        background: var(--panel);
+        border: 1px solid #263141;
+        border-radius: 14px;
+        padding: 18px;
+        box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
+      }
+      h1 { margin: 0 0 8px; font-size: 20px; }
+      label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 6px; }
+      input[type="text"] {
+        width: 100%; padding: 10px 12px; border-radius: 10px;
+        border: 1px solid #2a3545; background: #12171e; color: var(--text);
+      }
+      .status {
+        margin: 12px 0; padding: 10px 12px; border-radius: 10px;
+        background: #11161d; border: 1px solid #233040; color: var(--muted);
+      }
+      .actions { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+      button {
+        padding: 12px 16px; border-radius: 12px; border: none;
+        font-size: 14px; font-weight: 600; cursor: pointer;
+        color: #071108; background: var(--accent);
+      }
+      button.danger { background: var(--danger); color: #2b0505; }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap; background: #0f141b; border: 1px solid #233040;
+        border-radius: 12px; padding: 12px; color: #cfe6ff; font-size: 12px;
+        margin-top: 10px;
+      }
+      audio { width: 100%; margin-top: 10px; }
+      .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>FlowMate 单入口语音测试</h1>
+        <label for="apiBase">API Base URL</label>
+        <input id="apiBase" type="text" value="http://127.0.0.1:8000" />
+
+        <div class="status" id="status">Idle</div>
+
+        <div class="actions">
+          <button id="recordBtn">Start Recording</button>
+        </div>
+
+        <div class="hint">
+          试试说：
+          “捕捉闪念 …” / “我卡住了，不知道怎么开始” / “你好，今天状态不错”
+        </div>
+
+        <audio id="audioPlayer" controls></audio>
+        <div class="mono" id="responseBox">No response yet.</div>
+      </div>
+    </div>
+
+    <script>
+      const recordBtn = document.getElementById("recordBtn");
+      const statusEl = document.getElementById("status");
+      const audioPlayer = document.getElementById("audioPlayer");
+      const responseBox = document.getElementById("responseBox");
+      const apiBaseInput = document.getElementById("apiBase");
+
+      let mediaRecorder = null;
+      let chunks = [];
+      let stream = null;
+      let recording = false;
+      let startTime = 0;
+      let timerId = null;
+
+      function setStatus(text, isError = false) {
+        statusEl.textContent = text;
+        statusEl.style.color = isError ? "#ffb3b3" : "#9fb0c0";
+      }
+
+      function updateTimer() {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        setStatus(`Recording... ${elapsed}s`);
+      }
+
+      async function startRecording() {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          const options = { mimeType: "audio/webm;codecs=opus" };
+          const supported = MediaRecorder.isTypeSupported(options.mimeType);
+          mediaRecorder = new MediaRecorder(stream, supported ? options : undefined);
+          chunks = [];
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+              chunks.push(e.data);
+            }
+          };
+          mediaRecorder.onstop = () => {
+            const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+            sendToBackend(blob);
+          };
+          mediaRecorder.start();
+          recording = true;
+          recordBtn.textContent = "Stop Recording";
+          recordBtn.classList.add("danger");
+          startTime = Date.now();
+          timerId = setInterval(updateTimer, 500);
+          setStatus("Recording...");
+        } catch (err) {
+          setStatus(`Mic error: ${err.message || err}`, true);
+        }
+      }
+
+      function stopRecording() {
+        if (!mediaRecorder) return;
+        mediaRecorder.stop();
+        recording = false;
+        recordBtn.textContent = "Start Recording";
+        recordBtn.classList.remove("danger");
+        if (timerId) {
+          clearInterval(timerId);
+          timerId = null;
+        }
+        setStatus("Uploading...");
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+        }
+      }
+
+      async function sendToBackend(blob) {
+        const apiBase = apiBaseInput.value.trim().replace(/\/$/, "");
+        const url = `${apiBase}/api/interaction/voice`;
+        const form = new FormData();
+        const type = blob.type || "audio/webm";
+        const ext = type.includes("wav")
+          ? "wav"
+          : type.includes("ogg")
+          ? "ogg"
+          : type.includes("mp3")
+          ? "mp3"
+          : "webm";
+        form.append("audio", blob, `recording.${ext}`);
+
+        try {
+          const res = await fetch(url, { method: "POST", body: form });
+          const data = await res.json();
+          renderResponse(data);
+        } catch (err) {
+          setStatus(`Request error: ${err.message || err}`, true);
+        }
+      }
+
+      function renderResponse(payload) {
+        responseBox.textContent = JSON.stringify(payload, null, 2);
+        const status = payload.status || "unknown";
+        setStatus(`Response: ${status}`);
+
+        const audioB64 = payload?.data?.audio?.base64 || "";
+        if (audioB64) {
+          audioPlayer.src = `data:audio/mpeg;base64,${audioB64}`;
+          audioPlayer.play().catch(() => {});
+        } else {
+          audioPlayer.removeAttribute("src");
+          audioPlayer.load();
+        }
+      }
+
+      recordBtn.addEventListener("click", () => {
+        if (recording) stopRecording();
+        else startRecording();
+      });
+    </script>
+  </body>
+</html>
