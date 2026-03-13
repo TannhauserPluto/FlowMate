@@ -124,8 +124,26 @@ class VisionService:
             self.pose.close()
 
 
-# 全局实例 - 确保只初始化一次
-presence_detector = VisionService()
+presence_detector = None
+_presence_init_error = None
+
+
+def get_presence_detector():
+    global presence_detector, _presence_init_error
+    if presence_detector is not None or _presence_init_error is not None:
+        return presence_detector
+    if not settings.ENABLE_CAMERA:
+        return None
+    try:
+        presence_detector = VisionService()
+    except Exception as exc:
+        _presence_init_error = exc
+        presence_detector = None
+    return presence_detector
+
+
+def get_presence_init_error():
+    return _presence_init_error
 
 
 class ModelScopeVision:

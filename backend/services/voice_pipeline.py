@@ -23,37 +23,68 @@ class VoicePipelineService:
         audio_bytes: bytes,
         filename: Optional[str] = None,
         content_type: Optional[str] = None,
+        timings: Optional[Dict] = None,
+        request_start: Optional[float] = None,
     ) -> Dict:
+        base_start = request_start or time.perf_counter()
         start = time.perf_counter()
+        timings = timings or {}
+        stages = timings.setdefault("stages_ms", {})
+        if "request_received" not in stages:
+            stages["request_received"] = 0
 
-        asr_start = time.perf_counter()
-        asr_result = await self.asr.transcribe(audio_bytes, filename, content_type)
-        asr_ms = int((time.perf_counter() - asr_start) * 1000)
+        def record_stage(stage: str) -> None:
+            stages[stage] = int((time.perf_counter() - base_start) * 1000)
+
+        record_stage("asr_start")
+        try:
+            asr_start = time.perf_counter()
+            asr_result = await self.asr.transcribe(audio_bytes, filename, content_type)
+            asr_ms = int((time.perf_counter() - asr_start) * 1000)
+        except Exception:
+            record_stage("asr_done")
+            timings["error_stage"] = "asr"
+            raise
+        record_stage("asr_done")
 
         user_text = (asr_result.get("text") or "").strip()
         user_emotion = (asr_result.get("emotion") or "neutral").strip().lower()
 
-        llm_start = time.perf_counter()
-        if user_text:
-            interaction = await process_user_intent(user_text, user_emotion)
-            reply_text = (interaction.get("audio_text") or "").strip()
-            if not reply_text:
-                reply_text = "好的，我明白了，有需要随时告诉我。"
-                interaction["audio_text"] = reply_text
-        else:
-            interaction = {
-                "type": "chat",
-                "audio_text": "刚才没听清楚，可以再说一遍吗？",
-                "ui_payload": None,
-            }
-            reply_text = interaction["audio_text"]
-        llm_ms = int((time.perf_counter() - llm_start) * 1000)
+        record_stage("llm_start")
+        try:
+            llm_start = time.perf_counter()
+            if user_text:
+                interaction = await process_user_intent(user_text, user_emotion)
+                reply_text = (interaction.get("audio_text") or "").strip()
+                if not reply_text:
+                    reply_text = "好的，我明白了，有需要随时告诉我。"
+                    interaction["audio_text"] = reply_text
+            else:
+                interaction = {
+                    "type": "chat",
+                    "audio_text": "刚才没听清楚，可以再说一遍吗？",
+                    "ui_payload": None,
+                }
+                reply_text = interaction["audio_text"]
+            llm_ms = int((time.perf_counter() - llm_start) * 1000)
+        except Exception:
+            record_stage("llm_done")
+            timings["error_stage"] = "llm"
+            raise
+        record_stage("llm_done")
 
         tts_emotion = self._map_emotion(user_emotion)
 
-        tts_start = time.perf_counter()
-        tts_result = await self.tts.speak(reply_text, tts_emotion)
-        tts_ms = int((time.perf_counter() - tts_start) * 1000)
+        record_stage("tts_start")
+        try:
+            tts_start = time.perf_counter()
+            tts_result = await self.tts.speak(reply_text, tts_emotion)
+            tts_ms = int((time.perf_counter() - tts_start) * 1000)
+        except Exception:
+            record_stage("tts_done")
+            timings["error_stage"] = "tts"
+            raise
+        record_stage("tts_done")
 
         total_ms = int((time.perf_counter() - start) * 1000)
         print(
@@ -94,12 +125,31 @@ class VoicePipelineService:
                 "llm_ms": llm_ms,
                 "tts_ms": tts_ms,
                 "total_ms": total_ms,
+                "durations_ms": {
+                    "asr": asr_ms,
+                    "llm": llm_ms,
+                    "tts": tts_ms,
+                    "total": total_ms,
+                },
+                "stages_ms": stages,
             },
         }
 
         error_payload = self._merge_errors(asr_result, tts_result)
         if error_payload:
             response["error"] = error_payload
+            if "error_stage" not in timings:
+                if asr_result.get("status") == "error":
+                    timings["error_stage"] = "asr"
+                elif tts_result.get("status") == "error":
+                    timings["error_stage"] = "tts"
+
+        record_stage("response_build_done")
+        timings["total_ms"] = int((time.perf_counter() - base_start) * 1000)
+        if "error_stage" in timings:
+            response["timings"]["error_stage"] = timings["error_stage"]
+        response["timings"]["total_ms"] = timings["total_ms"]
+        response["timings"]["durations_ms"]["total"] = timings["total_ms"]
 
         return response
 

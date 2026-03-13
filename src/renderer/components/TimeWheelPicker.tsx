@@ -9,7 +9,7 @@ import imgDigit6 from '../assets/digits/6.png';
 import imgDigit7 from '../assets/digits/7.png';
 import imgDigit8 from '../assets/digits/8.png';
 import imgDigit9 from '../assets/digits/9.png';
-import imgColon from '../assets/digits/：.png';
+import imgColon from '../assets/digits/colon.png';
 
 const DEFAULT_ITEM_HEIGHT = 32;
 const DEFAULT_VIEW_HEIGHT = 160;

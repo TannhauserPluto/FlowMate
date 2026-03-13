@@ -11,7 +11,7 @@ import imgInnerBgTask from './assets/figma/inner-bg-task.png';
 import imgStarBlink from './assets/figma/starblink.png';
 import TimeWheelPicker, { TimeWheelValue } from './components/TimeWheelPicker';
 import imgStars from './assets/figma/star.png';
-import imgJourneyLineGraph from './assets/figma/journey-line-graph.png';
+import imgJourneyLineGraph from './assets/figma/Journey-line-graph.png';
 import starLv0 from './assets/star/star-lv0.png';
 import starLv1 from './assets/star/star-lv1.png';
 import starLv2 from './assets/star/star-lv2.png';
@@ -21,6 +21,14 @@ import vidIdle from './assets/video_loops/idle.webm';
 import vidTalk from './assets/video_loops/talk.webm';
 import vidFocus from './assets/video_loops/focus.webm';
 import vidStretch from './assets/video_loops/Stretch.webm';
+import {
+  parseTodoState,
+  readTodoState,
+  serializeTodoState,
+  TODO_STORAGE_KEY,
+  writeTodoState,
+  type StoredTodoState,
+} from './lib/storage';
 
 
 type View = 'home' | 'task' | 'timer' | 'focus' | 'break' | 'profile';
@@ -53,6 +61,8 @@ type TaskMessage = {
 const DEFAULT_CHAT_USER_TEXT = '我需要写一篇关于数字媒体交互的论文';
 const DEFAULT_CHAT_ASSISTANT_TEXT =
   '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list';
+const HOME_WELCOME_TEXT =
+  '你好呀，我是 FlowMate，你的心流维护小助手。你可以在输入框告诉我今天要完成的事，我会帮你拆解成待办；也可以点击麦克风直接说话。想进入专注计时就点下方的“番茄钟”，头像页可以查看进度。现在告诉我你的任务吧。';
 const DEFAULT_TASK_TITLE = '数字媒体论文';
 const DEFAULT_TODO_TEXTS = [
   '明确论文基本信息',
@@ -73,13 +83,100 @@ const TIMER_WHEEL_SIZE = {
   columnWidth: 46,
   separatorHeight: 56,
 };
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
+const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
 const sanitizeText = (text: string) =>
   text
     .replace(/<\|.*?\|>/g, '')
     .replace(/<Speech\|>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+const DEFAULT_BUBBLE_FONT =
+  "400 12.183px/1.6 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
+const DEFAULT_BUBBLE_TEXT_WIDTH = 228;
+let bubbleMetricsCache: { font: string; maxTextWidth: number } | null = null;
+let measureContext: CanvasRenderingContext2D | null = null;
+
+const getTextMeasureContext = () => {
+  if (measureContext) return measureContext;
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  measureContext = canvas.getContext('2d');
+  return measureContext;
+};
+
+const getBubbleMetrics = () => {
+  if (bubbleMetricsCache) return bubbleMetricsCache;
+  if (typeof document === 'undefined' || !document.body) {
+    bubbleMetricsCache = {
+      font: DEFAULT_BUBBLE_FONT,
+      maxTextWidth: DEFAULT_BUBBLE_TEXT_WIDTH,
+    };
+    return bubbleMetricsCache;
+  }
+  const probe = document.createElement('span');
+  probe.className = 'home-chat-bubble chat-bubble';
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.pointerEvents = 'none';
+  probe.style.whiteSpace = 'pre';
+  probe.style.top = '-9999px';
+  probe.textContent = 'M';
+  document.body.appendChild(probe);
+  const style = window.getComputedStyle(probe);
+  const font = `${style.fontWeight} ${style.fontSize} / ${style.lineHeight} ${style.fontFamily}`;
+  const maxWidth = Number.parseFloat(style.maxWidth || '');
+  const paddingLeft = Number.parseFloat(style.paddingLeft || '');
+  const paddingRight = Number.parseFloat(style.paddingRight || '');
+  const padding = (Number.isFinite(paddingLeft) ? paddingLeft : 0)
+    + (Number.isFinite(paddingRight) ? paddingRight : 0);
+  const maxTextWidth = Number.isFinite(maxWidth) && maxWidth > 0
+    ? Math.max(0, maxWidth - padding)
+    : DEFAULT_BUBBLE_TEXT_WIDTH;
+  document.body.removeChild(probe);
+  bubbleMetricsCache = { font, maxTextWidth };
+  return bubbleMetricsCache;
+};
+
+const wrapLineByWidth = (
+  line: string,
+  maxWidth: number,
+  ctx: CanvasRenderingContext2D,
+) => {
+  if (!line) return [''];
+  const result: string[] = [];
+  let current = '';
+  for (const char of line) {
+    const next = current + char;
+    if (ctx.measureText(next).width > maxWidth && current) {
+      result.push(current);
+      current = char;
+    } else {
+      current = next;
+    }
+  }
+  if (current) result.push(current);
+  return result;
+};
+
+const wrapTextByWidth = (text: string) => {
+  if (!text) return '';
+  const ctx = getTextMeasureContext();
+  const { font, maxTextWidth } = getBubbleMetrics();
+  if (!ctx || !maxTextWidth) return text;
+  ctx.font = font;
+  return text
+    .split('\n')
+    .flatMap((line) => wrapLineByWidth(line, maxTextWidth, ctx))
+    .join('\n');
+};
+const safeJsonParse = <T,>(raw: string | null, fallback: T): T => {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
 
 const getBeijingDate = () =>
   new Intl.DateTimeFormat('en-US', {
@@ -126,16 +223,19 @@ const toTimeWheelValue = (totalSeconds: number): TimeWheelValue => {
 
 
 const App: React.FC = () => {
+  const initialTodoState = useMemo(() => readTodoState(), []);
   const [currentView, setCurrentView] = useState<View>('home');
   const [profileTab, setProfileTab] = useState<ProfileTab>('day');
   const [encouragement, setEncouragement] = useState('让我来拆解你的任务吧～');
   const [chatUserText, setChatUserText] = useState(DEFAULT_CHAT_USER_TEXT);
   const [chatAssistantText, setChatAssistantText] = useState(DEFAULT_CHAT_ASSISTANT_TEXT);
+  const [homeChatBubble, setHomeChatBubble] = useState('');
+  const [speechBubbleText, setSpeechBubbleText] = useState('');
   const initialBoardIdRef = useRef(createBoardId());
-  const [taskTitle, setTaskTitle] = useState(DEFAULT_TASK_TITLE);
+  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? DEFAULT_TASK_TITLE);
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [isInitialTaskLocked, setIsInitialTaskLocked] = useState(false);
-  const [taskDate, setTaskDate] = useState(getBeijingDate());
+  const [taskDate, setTaskDate] = useState(initialTodoState?.taskDate ?? getBeijingDate());
   const [taskBoards, setTaskBoards] = useState<TaskBoard[]>([]);
   const [activeBoardId, setActiveBoardId] = useState(initialBoardIdRef.current);
   const [taskTimeline, setTaskTimeline] = useState<TaskTimelineItem[]>([
@@ -179,10 +279,13 @@ const App: React.FC = () => {
   const audioChunksRef = useRef<Blob[]>([]);
   const [isRecording, setIsRecording] = useState(false);
   const [isGeneratingTasks, setIsGeneratingTasks] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [homeIdleTick, setHomeIdleTick] = useState(0);
   const recordingHandlerRef = useRef<((blob: Blob) => Promise<void> | void) | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const audioUrlRef = useRef<string | null>(null);
   const audioEventsBoundRef = useRef(false);
+  const thinkingCountRef = useRef(0);
   const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
   const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastViewRef = useRef<View | null>(null);
@@ -190,10 +293,11 @@ const App: React.FC = () => {
   const [breakStretchPlayed, setBreakStretchPlayed] = useState(false);
   const [breakStretchQueued, setBreakStretchQueued] = useState(false);
 
-  const [todoItems, setTodoItems] = useState<TodoItem[]>(() => buildDefaultTodos());
-  const [doneItems, setDoneItems] = useState<TodoItem[]>([]);
+  const [todoItems, setTodoItems] = useState<TodoItem[]>(() => initialTodoState?.todoItems ?? buildDefaultTodos());
+  const [doneItems, setDoneItems] = useState<TodoItem[]>(() => initialTodoState?.doneItems ?? []);
   const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
   const [archivedTransitions, setArchivedTransitions] = useState<Record<string, 'toDone' | 'toTodo'>>({});
+  const todoStorageRef = useRef(initialTodoState ? serializeTodoState(initialTodoState) : '');
 
   const taskInputRef = useRef<HTMLInputElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
@@ -202,6 +306,36 @@ const App: React.FC = () => {
   const doneRefs = useRef(new Map<string, HTMLLIElement>());
   const todoPositions = useRef(new Map<string, DOMRect>());
   const donePositions = useRef(new Map<string, DOMRect>());
+
+  useEffect(() => {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== TODO_STORAGE_KEY) return;
+      const next = parseTodoState(event.newValue);
+      if (!next) return;
+      const serialized = serializeTodoState(next);
+      if (serialized === todoStorageRef.current) return;
+      todoStorageRef.current = serialized;
+      setTaskTitle(next.taskTitle);
+      setTaskDate(next.taskDate);
+      setTodoItems(next.todoItems);
+      setDoneItems(next.doneItems);
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    const nextState: StoredTodoState = {
+      taskTitle,
+      taskDate,
+      todoItems,
+      doneItems,
+    };
+    const serialized = serializeTodoState(nextState);
+    if (serialized === todoStorageRef.current) return;
+    todoStorageRef.current = serialized;
+    writeTodoState(nextState);
+  }, [taskTitle, taskDate, todoItems, doneItems]);
 
   const renderTodoCard = (
     board: TaskBoard,
@@ -285,6 +419,20 @@ const App: React.FC = () => {
       </ul>
     </div>
   );
+
+  const beginThinking = () => {
+    thinkingCountRef.current += 1;
+    if (thinkingCountRef.current === 1) {
+      setIsThinking(true);
+    }
+  };
+
+  const endThinking = () => {
+    thinkingCountRef.current = Math.max(0, thinkingCountRef.current - 1);
+    if (thinkingCountRef.current === 0) {
+      setIsThinking(false);
+    }
+  };
 
   const markBoardTodoDone = (boardId: string, itemId: string) => {
     const key = `${boardId}:${itemId}`;
@@ -430,7 +578,7 @@ const App: React.FC = () => {
     }
     if (primaryView === 'task') {
       try {
-        await fetch(`${API_BASE}/api/brain/audit/reset`, { method: 'POST' });
+        await fetch(`${API_BASE}/brain/audit/reset`, { method: 'POST' });
       } catch {
         // ignore audit reset failure
       }
@@ -505,10 +653,16 @@ const App: React.FC = () => {
     return audioPlayerRef.current;
   };
 
+  const setSpeechBubble = (text?: string) => {
+    if (!text) return;
+    setSpeechBubbleText(wrapTextByWidth(sanitizeText(text)));
+  };
+
   const speakText = async (text: string) => {
     if (!text) return;
+    setSpeechBubble(text);
     try {
-      const response = await fetch(`${API_BASE}/api/interaction/speak`, {
+      const response = await fetch(`${API_BASE}/interaction/speak`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, emotion: 'neutral' }),
@@ -539,7 +693,11 @@ const App: React.FC = () => {
   const playAudioFromUrl = async (url?: string) => {
     if (!url) return;
     const audio = ensureAudioPlayer();
-    const src = url.startsWith('http') ? url : `${API_BASE}${url}`;
+    const src = url.startsWith('http')
+      ? url
+      : url.startsWith('/api')
+        ? url
+        : `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
     audio.src = src;
     try {
       await audio.play();
@@ -629,7 +787,7 @@ const App: React.FC = () => {
           scheduleScreenCheck(8 * 60 * 1000);
           return;
         }
-        const response = await fetch(`${API_BASE}/api/focus/screen-check`, {
+        const response = await fetch(`${API_BASE}/focus/screen-check`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -640,6 +798,9 @@ const App: React.FC = () => {
         });
         if (!response.ok) return;
         const data = await response.json();
+        if (data?.reply) {
+          setSpeechBubble(data.reply);
+        }
         if (data?.audio?.base64) {
           playAudioFromBase64(data.audio.base64, data.audio.format);
         }
@@ -659,7 +820,7 @@ const App: React.FC = () => {
       const sessionId = focusSessionIdRef.current;
       if (!sessionId) return;
       try {
-        const response = await fetch(`${API_BASE}/api/focus/fatigue-check`, {
+        const response = await fetch(`${API_BASE}/focus/fatigue-check`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -671,12 +832,18 @@ const App: React.FC = () => {
         const data = await response.json();
         if (data?.action === 'ask_rest') {
           setIsAwaitingRestDecision(true);
+          if (data?.reply) {
+            setSpeechBubble(data.reply);
+          }
           if (data?.audio?.base64) {
             playAudioFromBase64(data.audio.base64, data.audio.format);
           }
         } else if (data?.action === 'shorten') {
           if (typeof data?.new_remaining_seconds === 'number') {
             setRemainingSeconds(data.new_remaining_seconds);
+          }
+          if (data?.reply) {
+            setSpeechBubble(data.reply);
           }
           if (data?.audio?.base64) {
             playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -694,11 +861,12 @@ const App: React.FC = () => {
 
   const requestFocusPrompt = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/focus/prompt`, { method: 'POST' });
+      const response = await fetch(`${API_BASE}/focus/prompt`, { method: 'POST' });
       if (!response.ok) return;
       const data = await response.json();
       if (data?.prompt) {
         setFocusPrompt(data.prompt);
+        setSpeechBubble(data.prompt);
       }
       if (data?.audio?.base64) {
         playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -717,7 +885,7 @@ const App: React.FC = () => {
   };
 
   const startFocusSession = async (taskText: string) => {
-    const response = await fetch(`${API_BASE}/api/focus/start`, {
+    const response = await fetch(`${API_BASE}/focus/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -734,6 +902,7 @@ const App: React.FC = () => {
     setIsAwaitingRestDecision(false);
     if (data?.reply) {
       setFocusPrompt(data.reply);
+      setSpeechBubble(data.reply);
     }
     if (data?.audio?.base64) {
       playAudioFromBase64(data.audio.base64, data.audio.format);
@@ -752,7 +921,7 @@ const App: React.FC = () => {
     if (isAwaitingRestDecision) {
       const decision = parseRestDecision(cleaned);
       const acceptRest = decision === null ? false : decision;
-      const response = await fetch(`${API_BASE}/api/focus/fatigue-response`, {
+      const response = await fetch(`${API_BASE}/focus/fatigue-response`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -763,6 +932,9 @@ const App: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
+        if (data?.reply) {
+          setSpeechBubble(data.reply);
+        }
         if (data?.audio?.base64) {
           playAudioFromBase64(data.audio.base64, data.audio.format);
         }
@@ -785,7 +957,7 @@ const App: React.FC = () => {
     if (!description.trim()) return;
     setIsGeneratingTasks(true);
     try {
-      const response = await fetch(`${API_BASE}/api/interaction/generate-tasks`, {
+      const response = await fetch(`${API_BASE}/interaction/generate-tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_description: description }),
@@ -820,7 +992,7 @@ const App: React.FC = () => {
   };
 
   const sendChatMessage = async (message: string) => {
-    const response = await fetch(`${API_BASE}/api/interaction/chat`, {
+    const response = await fetch(`${API_BASE}/interaction/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message }),
@@ -839,7 +1011,7 @@ const App: React.FC = () => {
       playAudioFromUrl(data.audio_url);
     } else if (data?.reply) {
       try {
-        const speakResponse = await fetch(`${API_BASE}/api/interaction/speak`, {
+        const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: data.reply, emotion: 'neutral' }),
@@ -856,7 +1028,8 @@ const App: React.FC = () => {
   const applyInteraction = async (interaction: any, userText?: string) => {
     if (!interaction) return;
     const cleanedUserText = userText ? sanitizeText(userText) : '';
-    if (!isInitialTaskLocked) {
+    const isHomeChat = isHomeView && interaction.type === 'chat';
+    if (!isInitialTaskLocked && !isHomeChat) {
       if (userText) setChatUserText(cleanedUserText);
       if (interaction.audio_text) setChatAssistantText(sanitizeText(interaction.audio_text));
     }
@@ -864,7 +1037,10 @@ const App: React.FC = () => {
     if (interaction.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
       try {
         const key = 'flowmate.memos';
-        const prev = JSON.parse(window.localStorage.getItem(key) ?? '[]');
+        const prev = safeJsonParse(
+          window.localStorage.getItem(key),
+          [] as Array<{ content: string; created_at: string }>,
+        );
         prev.push({
           content: interaction.ui_payload.content,
           created_at: new Date().toISOString(),
@@ -873,6 +1049,28 @@ const App: React.FC = () => {
       } catch {
         // ignore storage failures
       }
+      return;
+    }
+
+    if (interaction.type === 'chat') {
+      const assistantText = sanitizeText(interaction.audio_text || '');
+      if (isHomeView) {
+        if (assistantText) {
+          setHomeChatBubble(wrapTextByWidth(assistantText));
+          void speakText(assistantText);
+        }
+        return;
+      }
+      if (cleanedUserText) {
+        setChatUserText(cleanedUserText);
+        appendTaskMessage('user', cleanedUserText);
+      }
+      if (assistantText) {
+        setChatAssistantText(assistantText);
+        appendTaskMessage('assistant', assistantText);
+        void speakText(assistantText);
+      }
+      setIsInitialTaskLocked(true);
       return;
     }
 
@@ -894,7 +1092,7 @@ const App: React.FC = () => {
   };
 
   const sendTextIntent = async (text: string) => {
-    const response = await fetch(`${API_BASE}/api/interaction/intent`, {
+    const response = await fetch(`${API_BASE}/interaction/intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -908,7 +1106,7 @@ const App: React.FC = () => {
   };
 
   const requestIntent = async (text: string) => {
-    const response = await fetch(`${API_BASE}/api/interaction/intent`, {
+    const response = await fetch(`${API_BASE}/interaction/intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
@@ -920,27 +1118,43 @@ const App: React.FC = () => {
   };
 
   const sendVoiceIntent = async (audioBlob: Blob) => {
-    const form = new FormData();
-    form.append('audio', audioBlob, 'voice.webm');
-    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
-      method: 'POST',
-      body: form,
-    });
-    if (!response.ok) {
-      throw new Error('Voice request failed');
+    beginThinking();
+    try {
+      const requestStart = performance.now();
+      const form = new FormData();
+      form.append('audio', audioBlob, 'voice.webm');
+      const response = await fetch(`${API_BASE}/interaction/voice`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!response.ok) {
+        const elapsed = Math.round(performance.now() - requestStart);
+        console.warn('[voice] request_failed', { status: response.status, elapsed_ms: elapsed });
+        throw new Error('Voice request failed');
+      }
+      const payload = await response.json();
+      const timings = payload?.timings;
+      if (timings) {
+        console.log('[voice] timings', timings);
+      }
+      console.log('[voice] request_ms', Math.round(performance.now() - requestStart));
+      const interaction = payload?.data?.interaction;
+      const userText = payload?.data?.user?.text;
+      await applyInteraction(interaction, userText);
+      playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+    } finally {
+      endThinking();
     }
-    const payload = await response.json();
-    const interaction = payload?.data?.interaction;
-    const userText = payload?.data?.user?.text;
-    await applyInteraction(interaction, userText);
-    playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
   };
 
   const handleHomeTextSubmit = async (text: string) => {
+    beginThinking();
     try {
       await sendTextIntent(text);
     } catch {
       // ignore for now
+    } finally {
+      endThinking();
     }
   };
 
@@ -996,81 +1210,101 @@ const App: React.FC = () => {
   };
 
   const handleTaskInputSubmit = async (text: string) => {
-    const cleaned = sanitizeText(text);
-    const shouldArchive = isInitialTaskLocked;
-    appendTaskMessage('user', cleaned);
+    beginThinking();
     try {
-      const interaction = await requestIntent(cleaned);
-      if (interaction?.type === 'command') {
-        await applyInteraction(interaction, cleaned);
-        return;
-      }
-      if (interaction?.type === 'breakdown') {
-        if (interaction?.audio_text) {
-          const assistantText = sanitizeText(interaction.audio_text);
-          if (!isInitialTaskLocked) {
-            setChatUserText(cleaned);
-            setChatAssistantText(assistantText);
-            setIsInitialTaskLocked(true);
-          }
-          appendTaskMessage('assistant', assistantText);
-          try {
-            const speakResponse = await fetch(`${API_BASE}/api/interaction/speak`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
-            });
-            if (speakResponse.ok) {
-              const payload = await speakResponse.json();
-              playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
-            }
-          } catch {
-            // ignore speak errors
-          }
+      const cleaned = sanitizeText(text);
+      const shouldArchive = isInitialTaskLocked;
+      appendTaskMessage('user', cleaned);
+      try {
+        const interaction = await requestIntent(cleaned);
+        if (interaction?.type === 'command') {
+          await applyInteraction(interaction, cleaned);
+          return;
         }
-        await generateTasks(cleaned, shouldArchive);
-        return;
+        if (interaction?.type === 'breakdown') {
+          if (interaction?.audio_text) {
+            const assistantText = sanitizeText(interaction.audio_text);
+            if (!isInitialTaskLocked) {
+              setChatUserText(cleaned);
+              setChatAssistantText(assistantText);
+              setIsInitialTaskLocked(true);
+            }
+            appendTaskMessage('assistant', assistantText);
+            try {
+              const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
+              });
+              if (speakResponse.ok) {
+                const payload = await speakResponse.json();
+                playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+              }
+            } catch {
+              // ignore speak errors
+            }
+          }
+          await generateTasks(cleaned, shouldArchive);
+          return;
+        }
+      } catch {
+        // ignore intent errors
       }
-    } catch {
-      // ignore intent errors
+      await sendChatMessage(cleaned);
+    } finally {
+      endThinking();
     }
-    await sendChatMessage(cleaned);
   };
 
   const sendVoiceChat = async (audioBlob: Blob) => {
-    const form = new FormData();
-    form.append('audio', audioBlob, 'voice.webm');
-    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
-      method: 'POST',
-      body: form,
-    });
-    if (!response.ok) return;
-    const payload = await response.json();
-    const userText = sanitizeText(payload?.data?.user?.text || '');
-    const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
-    const interaction = payload?.data?.interaction;
-    const shouldArchive = isInitialTaskLocked;
-    if (interaction?.type === 'command') {
-      await applyInteraction(interaction, userText);
-      return;
-    }
-    if (userText) {
-      if (!isInitialTaskLocked) {
-        setChatUserText(userText);
+    beginThinking();
+    try {
+      const requestStart = performance.now();
+      const form = new FormData();
+      form.append('audio', audioBlob, 'voice.webm');
+      const response = await fetch(`${API_BASE}/interaction/voice`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!response.ok) {
+        const elapsed = Math.round(performance.now() - requestStart);
+        console.warn('[voice-chat] request_failed', { status: response.status, elapsed_ms: elapsed });
+        return;
       }
-      appendTaskMessage('user', userText);
-    }
-    if (assistantText) {
-      if (!isInitialTaskLocked) {
-        setChatAssistantText(assistantText);
-        setIsInitialTaskLocked(true);
+      const payload = await response.json();
+      const timings = payload?.timings;
+      if (timings) {
+        console.log('[voice-chat] timings', timings);
       }
-      appendTaskMessage('assistant', assistantText);
+      console.log('[voice-chat] request_ms', Math.round(performance.now() - requestStart));
+      const userText = sanitizeText(payload?.data?.user?.text || '');
+      const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
+      const interaction = payload?.data?.interaction;
+      const shouldArchive = isInitialTaskLocked;
+      if (interaction?.type === 'command') {
+        await applyInteraction(interaction, userText);
+        return;
+      }
+      if (userText) {
+        if (!isInitialTaskLocked) {
+          setChatUserText(userText);
+        }
+        appendTaskMessage('user', userText);
+      }
+      if (assistantText) {
+        if (!isInitialTaskLocked) {
+          setChatAssistantText(assistantText);
+          setIsInitialTaskLocked(true);
+        }
+        appendTaskMessage('assistant', assistantText);
+      }
+      if (interaction?.type === 'breakdown' && userText) {
+        await generateTasks(userText, shouldArchive);
+      }
+      playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+    } finally {
+      endThinking();
     }
-    if (interaction?.type === 'breakdown' && userText) {
-      await generateTasks(userText, shouldArchive);
-    }
-    playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
   };
 
   const handleTaskAudioClick = () => {
@@ -1082,20 +1316,40 @@ const App: React.FC = () => {
   };
 
   const handleFocusTextSubmit = async (text: string) => {
-    await handleFocusUserText(text);
+    beginThinking();
+    try {
+      await handleFocusUserText(text);
+    } finally {
+      endThinking();
+    }
   };
 
   const sendFocusVoice = async (audioBlob: Blob) => {
-    const form = new FormData();
-    form.append('audio', audioBlob, 'voice.webm');
-    const response = await fetch(`${API_BASE}/api/interaction/voice`, {
-      method: 'POST',
-      body: form,
-    });
-    if (!response.ok) return;
-    const payload = await response.json();
-    const userText = sanitizeText(payload?.data?.user?.text || '');
-    await handleFocusUserText(userText);
+    beginThinking();
+    try {
+      const requestStart = performance.now();
+      const form = new FormData();
+      form.append('audio', audioBlob, 'voice.webm');
+      const response = await fetch(`${API_BASE}/interaction/voice`, {
+        method: 'POST',
+        body: form,
+      });
+      if (!response.ok) {
+        const elapsed = Math.round(performance.now() - requestStart);
+        console.warn('[voice-focus] request_failed', { status: response.status, elapsed_ms: elapsed });
+        return;
+      }
+      const payload = await response.json();
+      const timings = payload?.timings;
+      if (timings) {
+        console.log('[voice-focus] timings', timings);
+      }
+      console.log('[voice-focus] request_ms', Math.round(performance.now() - requestStart));
+      const userText = sanitizeText(payload?.data?.user?.text || '');
+      await handleFocusUserText(userText);
+    } finally {
+      endThinking();
+    }
   };
 
   const handleFocusAudioClick = () => {
@@ -1217,7 +1471,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let mounted = true;
-    fetch(`${API_BASE}/api/interaction/encouragement`)
+    fetch(`${API_BASE}/interaction/encouragement`)
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (!mounted || !data?.encouragement) return;
@@ -1228,6 +1482,12 @@ const App: React.FC = () => {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isHomeView || homeChatBubble) return;
+    setHomeChatBubble(wrapTextByWidth(HOME_WELCOME_TEXT));
+    void speakText(HOME_WELCOME_TEXT);
+  }, [isHomeView, homeChatBubble]);
 
   useEffect(() => {
     remainingSecondsRef.current = remainingSeconds;
@@ -1305,6 +1565,14 @@ const App: React.FC = () => {
   }, [isBreakView, isAvatarSpeaking]);
 
   useEffect(() => {
+    if (primaryView !== 'home' || currentView === 'profile' || isAvatarSpeaking) return;
+    const intervalId = window.setInterval(() => {
+      setHomeIdleTick((prev) => prev + 1);
+    }, 6000);
+    return () => window.clearInterval(intervalId);
+  }, [primaryView, currentView, isAvatarSpeaking]);
+
+  useEffect(() => {
     const video = avatarVideoRef.current;
     if (!video) return;
     const handleEnded = () => {
@@ -1326,6 +1594,10 @@ const App: React.FC = () => {
     if (currentView === 'break' && prevView !== 'break') {
       setBreakStretchPlayed(false);
     }
+
+    const returningFromProfile = prevView === 'profile' && currentView !== 'profile';
+    const shouldExitTalk = !isAvatarSpeaking && video.dataset.state === 'talk';
+    const shouldResetBase = prevView !== currentView || returningFromProfile || shouldExitTalk;
 
     const playAvatar = (state: string, src: string, loop: boolean, restart: boolean) => {
       if (video.dataset.state !== state) {
@@ -1351,10 +1623,14 @@ const App: React.FC = () => {
         return;
       }
       if (breakStretchQueued && !breakStretchPlayed) {
-        playAvatar('stretch', vidStretch, false, prevView !== currentView || video.dataset.state !== 'stretch');
+        playAvatar('stretch', vidStretch, false, shouldResetBase || video.dataset.state !== 'stretch');
         return;
       }
-      video.pause();
+      if (shouldResetBase) {
+        playAvatar('idle', vidIdle, false, true);
+      } else {
+        video.pause();
+      }
       return;
     }
 
@@ -1362,7 +1638,7 @@ const App: React.FC = () => {
       if (isAvatarSpeaking) {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
       } else {
-        playAvatar('focus', vidFocus, true, video.dataset.state !== 'focus');
+        playAvatar('focus', vidFocus, true, shouldResetBase || video.dataset.state !== 'focus');
       }
       return;
     }
@@ -1372,7 +1648,7 @@ const App: React.FC = () => {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
         return;
       }
-      if (prevView !== currentView) {
+      if (shouldResetBase) {
         playAvatar('idle', vidIdle, false, true);
       }
       return;
@@ -1383,7 +1659,7 @@ const App: React.FC = () => {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
         return;
       }
-      if (prevView !== 'home') {
+      if (shouldResetBase || homeIdleTick > 0) {
         playAvatar('idle', vidIdle, false, true);
       }
     }
@@ -1396,6 +1672,7 @@ const App: React.FC = () => {
     primaryView,
     breakStretchPlayed,
     breakStretchQueued,
+    homeIdleTick,
   ]);
 
   useEffect(() => {
@@ -1409,7 +1686,7 @@ const App: React.FC = () => {
         return;
       }
       try {
-        await fetch(`${API_BASE}/api/focus/finish`, {
+        await fetch(`${API_BASE}/focus/finish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: focusSessionId }),
@@ -1468,7 +1745,7 @@ const App: React.FC = () => {
       <div className={`app-layout ${currentView === 'profile' ? 'is-profile' : ''}`}>
         <UiScaleFrame>
           <div
-            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${isBreakView ? 'is-break-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''}`}
+            className={`window ${isTaskRunning ? 'is-task-running' : ''} ${isTimerView ? 'is-timer-view' : ''} ${isFocusView ? 'is-focus-view' : ''} ${isBreakView ? 'is-break-view' : ''} ${currentView === 'profile' ? 'is-profile-view' : ''} ${currentView === 'home' ? 'is-home-view' : ''}`}
             data-name="Window"
             data-node-id="240:213"
           >
@@ -1669,6 +1946,16 @@ const App: React.FC = () => {
                     <img src={imgStarBlink} alt="" />
                   </div>
                 )}
+                {isHomeView && homeChatBubble && (
+                  <div className="home-chat-bubble chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
+                    {homeChatBubble}
+                  </div>
+                )}
+                {isTimerView && isAvatarSpeaking && speechBubbleText && (
+                  <div className="home-chat-bubble chat-bubble chat-bubble-user chat-bubble-glass glass-widget glass-widget--border glass-widget-surface">
+                    {speechBubbleText}
+                  </div>
+                )}
                 <div className="left-pane" data-name="左侧" data-node-id="262:230">
                   <div className="left-pane-bg" aria-hidden="true">
                     <img className="left-pane-bg-image" src={imgInnerBgTask} alt="" />
@@ -1708,7 +1995,7 @@ const App: React.FC = () => {
                         {isHomeView ? encouragement : '让我来拆解你的任务吧～'}
                       </p>
                       <VoiceInput
-                        placeholder="今天要完成什么呢？"
+                        placeholder={isThinking ? 'FlowMate正在思考...' : '今天要完成什么呢？'}
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
                         isRecording={isRecording}
@@ -1719,7 +2006,7 @@ const App: React.FC = () => {
                   )}
                   {isFocusView && (
                     <VoiceInput
-                      placeholder={focusTaskText ? "需要补充什么吗？" : "这次专注准备完成什么任务呢？"}
+                      placeholder={isThinking ? 'FlowMate正在思考...' : (focusTaskText ? "需要补充什么吗？" : "这次专注准备完成什么任务呢？")}
                       plusIcon={imgPlusMath}
                       audioIcon={imgAudioWave}
                       isRecording={isRecording}
@@ -1775,7 +2062,7 @@ const App: React.FC = () => {
                     <div className="task-input">
                       <VoiceInput
                         ref={taskInputRef}
-                        placeholder="今天要完成什么呢？"
+                        placeholder={isThinking ? 'FlowMate正在思考...' : '今天要完成什么呢？'}
                         plusIcon={imgPlusMath}
                         audioIcon={imgAudioWave}
                         isRecording={isRecording}

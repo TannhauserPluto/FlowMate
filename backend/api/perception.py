@@ -9,7 +9,8 @@ from pydantic import BaseModel
 from typing import Optional
 
 from services import vision_service, fatigue_detector
-from services.modelscope_vision import presence_detector
+from services.modelscope_vision import get_presence_detector, get_presence_init_error
+from config import settings
 from core import flow_manager
 
 router = APIRouter()
@@ -47,9 +48,27 @@ async def analyze_presence(request: PresenceRequest):
     start_time = time.time()
     
     try:
-        result = presence_detector.detect_presence_from_base64(request.image)
+        detector = get_presence_detector()
+        if detector is None:
+            latency_ms = int((time.time() - start_time) * 1000)
+            init_error = get_presence_init_error()
+            if not settings.ENABLE_CAMERA:
+                debug_info = "presence disabled (ENABLE_CAMERA=false)"
+            elif init_error:
+                debug_info = f"presence init failed: {init_error}"
+            else:
+                debug_info = "presence disabled"
+            return PresenceResponse(
+                presence=False,
+                confidence=0.0,
+                landmarks_count=0,
+                debug_info=debug_info,
+                latency_ms=latency_ms,
+            )
+    
+        result = detector.detect_presence_from_base64(request.image)
         latency_ms = int((time.time() - start_time) * 1000)
-        
+    
         return PresenceResponse(
             presence=result["presence"],
             confidence=result["confidence"],

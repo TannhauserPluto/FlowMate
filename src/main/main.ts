@@ -5,12 +5,33 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 let mainWindow: BrowserWindow | null = null;
+let miniWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 
 const isDev = !app.isPackaged;
+const MINI_DESIGN_WIDTH = 266;
+const MINI_DESIGN_HEIGHT = 241;
+const MINI_ASPECT_RATIO = MINI_DESIGN_WIDTH / MINI_DESIGN_HEIGHT;
+const MINI_MIN_WIDTH = 220;
+const MINI_MAX_WIDTH = 420;
+const MINI_MIN_HEIGHT = Math.round(MINI_MIN_WIDTH / MINI_ASPECT_RATIO);
+const MINI_MAX_HEIGHT = Math.round(MINI_MAX_WIDTH / MINI_ASPECT_RATIO);
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+const hideAllWindows = () => {
+  mainWindow?.hide();
+  miniWindow?.hide();
+};
+
+const showAllWindows = () => {
+  mainWindow?.show();
+  mainWindow?.focus();
+  miniWindow?.show();
+  miniWindow?.focus();
+};
 
 function createWindow(): void {
   const aspectRatio = 985.766 / 554.493;
@@ -40,16 +61,27 @@ function createWindow(): void {
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    mainWindow?.hide();
+    hideAllWindows();
+  });
+
+  mainWindow.on('minimize', (event: Electron.Event) => {
+    event.preventDefault();
+    hideAllWindows();
   });
 
   ipcMain.removeHandler('window:get-bounds');
   ipcMain.removeHandler('window:set-bounds');
   ipcMain.removeHandler('window:minimize');
   ipcMain.removeHandler('window:close');
-  ipcMain.handle('window:get-bounds', () => mainWindow?.getBounds());
-  ipcMain.handle('window:set-bounds', (_event, bounds) => {
-    if (!mainWindow) return false;
+  ipcMain.removeHandler('mini-window:get-bounds');
+  ipcMain.removeHandler('mini-window:set-bounds');
+  ipcMain.handle('window:get-bounds', (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    return target?.getBounds();
+  });
+  ipcMain.handle('window:set-bounds', (event, bounds) => {
+    const target = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    if (!target) return false;
     if (!bounds || typeof bounds !== 'object') return false;
     const nextBounds = {
       x: Math.round(Number(bounds.x)),
@@ -70,17 +102,58 @@ function createWindow(): void {
       console.error('[window:set-bounds] non-positive bounds', nextBounds);
       return false;
     }
-    mainWindow.setBounds(nextBounds);
+    target.setBounds(nextBounds);
     return true;
   });
-  ipcMain.handle('window:minimize', () => {
-    if (!mainWindow) return false;
-    mainWindow.minimize();
+  ipcMain.handle('window:minimize', (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    if (!target) return false;
+    hideAllWindows();
     return true;
   });
-  ipcMain.handle('window:close', () => {
-    if (!mainWindow) return false;
-    mainWindow.close();
+  ipcMain.handle('window:close', (event) => {
+    const target = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
+    if (!target) return false;
+    target.close();
+    return true;
+  });
+  ipcMain.handle('mini-window:get-bounds', () => miniWindow?.getBounds());
+  ipcMain.handle('mini-window:set-bounds', (_event, bounds) => {
+    if (!miniWindow) return false;
+    if (!bounds || typeof bounds !== 'object') return false;
+    const currentBounds = miniWindow.getBounds();
+    const nextBounds = {
+      x: Math.round(Number(bounds.x)),
+      y: Math.round(Number(bounds.y)),
+      width: Math.round(Number(bounds.width)),
+      height: Math.round(Number(bounds.height)),
+    };
+    if (
+      !Number.isFinite(nextBounds.x) ||
+      !Number.isFinite(nextBounds.y) ||
+      !Number.isFinite(nextBounds.width) ||
+      !Number.isFinite(nextBounds.height)
+    ) {
+      console.error('[mini-window:set-bounds] invalid bounds', bounds);
+      return false;
+    }
+    const widthDelta = Math.abs(nextBounds.width - currentBounds.width);
+    const heightDelta = Math.abs(nextBounds.height - currentBounds.height);
+    if (Number.isFinite(nextBounds.width) && Number.isFinite(nextBounds.height)) {
+      if (widthDelta >= heightDelta) {
+        nextBounds.width = clamp(nextBounds.width, MINI_MIN_WIDTH, MINI_MAX_WIDTH);
+        nextBounds.height = Math.round(nextBounds.width / MINI_ASPECT_RATIO);
+      } else {
+        nextBounds.height = clamp(nextBounds.height, MINI_MIN_HEIGHT, MINI_MAX_HEIGHT);
+        nextBounds.width = Math.round(nextBounds.height * MINI_ASPECT_RATIO);
+      }
+    }
+
+    if (nextBounds.width < 1 || nextBounds.height < 1) {
+      console.error('[mini-window:set-bounds] non-positive bounds', nextBounds);
+      return false;
+    }
+    miniWindow.setBounds(nextBounds);
     return true;
   });
   ipcMain.handle('screen:capture', async () => {
@@ -126,6 +199,64 @@ function createWindow(): void {
   });
 }
 
+function createMiniWindow(): void {
+  if (miniWindow) return;
+  const miniWidth = MINI_DESIGN_WIDTH;
+  const miniHeight = MINI_DESIGN_HEIGHT;
+  const miniMinWidth = MINI_MIN_WIDTH;
+  const miniMinHeight = MINI_MIN_HEIGHT;
+  const miniMaxWidth = MINI_MAX_WIDTH;
+  const miniMaxHeight = MINI_MAX_HEIGHT;
+  miniWindow = new BrowserWindow({
+    width: miniWidth,
+    height: miniHeight,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    skipTaskbar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+
+  miniWindow.setAspectRatio(MINI_ASPECT_RATIO);
+  const mainBounds = mainWindow?.getBounds();
+  const display = mainBounds ? screen.getDisplayMatching(mainBounds) : screen.getPrimaryDisplay();
+  const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = display.workArea;
+  const baseX = mainBounds ? mainBounds.x + mainBounds.width - 200 : displayX - 200;
+  const baseY = mainBounds ? mainBounds.y + 120 : displayY + 120;
+  const clampedX = Math.min(Math.max(baseX, displayX), displayX + displayWidth - miniWidth);
+  const clampedY = Math.min(Math.max(baseY, displayY), displayY + displayHeight - miniHeight);
+  miniWindow.setBounds({ x: clampedX, y: clampedY, width: miniWidth, height: miniHeight });
+  miniWindow.setMinimumSize(miniMinWidth, miniMinHeight);
+  miniWindow.setMaximumSize(miniMaxWidth, miniMaxHeight);
+
+  miniWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    hideAllWindows();
+  });
+
+  miniWindow.on('minimize', (event: Electron.Event) => {
+    event.preventDefault();
+    hideAllWindows();
+  });
+
+  if (isDev) {
+    miniWindow.loadURL('http://localhost:5173/?mini=1');
+  } else {
+    miniWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { search: 'mini=1' });
+  }
+
+  miniWindow.on('closed', () => {
+    miniWindow = null;
+  });
+}
+
 function resolveTrayIconPath(): string | null {
   const candidates = [
     path.join(app.getAppPath(), 'src', 'renderer', 'assets', 'figma', 'logo.png'),
@@ -146,13 +277,14 @@ function createTray(): void {
   tray.setToolTip('FlowMate');
 
   tray.on('click', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isVisible()) {
-      mainWindow.focus();
-    } else {
-      mainWindow.show();
-      mainWindow.focus();
+    if (!mainWindow && !miniWindow) return;
+    const shouldShow = !mainWindow?.isVisible() || !miniWindow?.isVisible();
+    if (shouldShow) {
+      showAllWindows();
+      return;
     }
+    mainWindow?.focus();
+    miniWindow?.focus();
   });
 
   const contextMenu = Menu.buildFromTemplate([
@@ -169,6 +301,7 @@ function createTray(): void {
 
 app.whenReady().then(() => {
   createWindow();
+  createMiniWindow();
   createTray();
 
   const okScreen = globalShortcut.register('CommandOrControl+1', () => {
@@ -197,8 +330,10 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      createMiniWindow();
     }
     mainWindow?.show();
+    miniWindow?.show();
   });
 });
 

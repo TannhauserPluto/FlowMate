@@ -8,6 +8,8 @@ electron_1.contextBridge.exposeInMainWorld('electron', {
             'window:set-bounds',
             'window:minimize',
             'window:close',
+            'mini-window:get-bounds',
+            'mini-window:set-bounds',
             'screen:capture',
         ];
         if (validChannels.includes(channel)) {

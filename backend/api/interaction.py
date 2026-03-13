@@ -10,6 +10,7 @@ from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
 import random
+import time
 
 try:
     from zoneinfo import ZoneInfo
@@ -183,17 +184,35 @@ async def voice_chat(
 ):
     """Voice pipeline: ASR -> LLM -> TTS."""
     try:
+        request_start = time.perf_counter()
+        timings = {"stages_ms": {"request_received": 0}}
         audio_bytes = await audio.read()
+        timings["stages_ms"]["audio_read_done"] = int((time.perf_counter() - request_start) * 1000)
         result = await voice_pipeline_service.handle(
             audio_bytes=audio_bytes,
             filename=audio.filename,
             content_type=audio.content_type,
+            timings=timings,
+            request_start=request_start,
         )
         # Context is reserved for future use (e.g., memory injection)
         _ = context
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        error_timings = locals().get("timings") or {}
+        start_ref = locals().get("request_start")
+        if error_timings and "total_ms" not in error_timings and start_ref is not None:
+            error_timings["total_ms"] = int((time.perf_counter() - start_ref) * 1000)
+        if error_timings and "error_stage" not in error_timings:
+            error_timings["error_stage"] = "unknown"
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": str(e),
+                "error_stage": error_timings.get("error_stage"),
+                "timings": error_timings,
+            },
+        )
 
 
 @router.post("/chat", response_model=ChatResponse)
