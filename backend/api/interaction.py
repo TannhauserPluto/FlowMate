@@ -278,6 +278,7 @@ async def interaction_ws(websocket: WebSocket):
     audio_buffers = {}
     turn_modes = {}
     turn_tokens = {}
+    ended_turns = set()
 
     async def send(payload: dict) -> None:
         await websocket.send_text(json.dumps(payload, ensure_ascii=True))
@@ -505,6 +506,13 @@ async def interaction_ws(websocket: WebSocket):
                 turn_tokens.pop(turn_id, None)
                 asr_adapter.close_session(turn_id, reason="llm_error")
 
+    def log_unknown_turn(stage: str, turn_id: Optional[str], reason: str) -> None:
+        known_turns = list(audio_buffers.keys())
+        print(
+            "[ws] unknown_turn_emit "
+            f"turn_id={turn_id} stage={stage} knownTurnIds={known_turns} reason={reason}"
+        )
+
     try:
         while True:
             try:
@@ -542,6 +550,8 @@ async def interaction_ws(websocket: WebSocket):
                     "first_chunk_at": None,
                     "last_seq": -1,
                     "mime_type": None,
+                    "sample_rate": None,
+                    "ended": False,
                 }
                 asr_adapter.start_session(active_turn_id)
                 turn_tokens[active_turn_id] = turn_token
@@ -605,10 +615,20 @@ async def interaction_ws(websocket: WebSocket):
             if message_type == "audio_chunk":
                 turn_id = payload.get("turn_id") or active_turn_id
                 if not turn_id or turn_id not in audio_buffers:
+                    log_unknown_turn("audio_chunk", turn_id, "missing_audio_buffer")
                     await send({
                         "type": "error",
                         "turn_id": turn_id,
                         "message": "unknown_turn",
+                    })
+                    continue
+                buffer = audio_buffers[turn_id]
+                if buffer.get("ended"):
+                    print(f"[ws] audio_chunk_ignored_after_end turn_id={turn_id}")
+                    await send({
+                        "type": "ack",
+                        "turn_id": turn_id,
+                        "message": "audio_chunk",
                     })
                     continue
                 audio_b64 = (payload.get("audio") or "").strip()
@@ -635,7 +655,6 @@ async def interaction_ws(websocket: WebSocket):
                         "message": "empty_audio_bytes",
                     })
                     continue
-                buffer = audio_buffers[turn_id]
                 seq = payload.get("seq")
                 if isinstance(seq, int):
                     expected = buffer["last_seq"] + 1
@@ -653,15 +672,38 @@ async def interaction_ws(websocket: WebSocket):
                     print(f"[ws] first_audio_chunk_ms={first_chunk_ms} turn_id={turn_id}")
                 if not buffer["mime_type"]:
                     buffer["mime_type"] = payload.get("mime_type")
+                    buffer["sample_rate"] = payload.get("sample_rate")
+                    print(
+                        "[ws] ws_audio_mime "
+                        f"turn_id={turn_id} mime={buffer['mime_type']} sample_rate={buffer.get('sample_rate')}"
+                    )
                 buffer["total_bytes"] += len(audio_bytes)
                 buffer["count"] += 1
-                if not asr_adapter.push_chunk(turn_id, audio_bytes, seq, buffer["mime_type"]):
+                if not asr_adapter.push_chunk(
+                    turn_id,
+                    audio_bytes,
+                    seq,
+                    buffer["mime_type"],
+                    buffer.get("sample_rate"),
+                ):
                     await send({
                         "type": "error",
                         "turn_id": turn_id,
                         "message": "asr_session_missing",
                     })
                     continue
+                for partial in asr_adapter.drain_partials(turn_id):
+                    text = (partial.get("text") or "").strip()
+                    if not text:
+                        continue
+                    await send({
+                        "type": "partial_asr",
+                        "turn_id": turn_id,
+                        "text": text,
+                        "mock": False,
+                        "source": "asr_stream",
+                        "phase": partial.get("phase") or "partial",
+                    })
                 await send({
                     "type": "ack",
                     "turn_id": turn_id,
@@ -671,7 +713,16 @@ async def interaction_ws(websocket: WebSocket):
 
             if message_type == "end_audio":
                 turn_id = payload.get("turn_id") or active_turn_id
+                if turn_id and turn_id in ended_turns:
+                    print(f"[ws] end_audio_ignored_duplicate turn_id={turn_id} reason=ended_turns")
+                    await send({
+                        "type": "ack",
+                        "turn_id": turn_id,
+                        "message": "end_audio",
+                    })
+                    continue
                 if not turn_id or turn_id not in audio_buffers:
+                    log_unknown_turn("end_audio", turn_id, "missing_audio_buffer")
                     await send({
                         "type": "error",
                         "turn_id": turn_id,
@@ -688,6 +739,18 @@ async def interaction_ws(websocket: WebSocket):
                     continue
                 mode = turn_modes.get(turn_id) or "text"
                 buffer = audio_buffers[turn_id]
+                if buffer.get("ended"):
+                    print(f"[ws] end_audio_ignored_duplicate turn_id={turn_id}")
+                    await send({
+                        "type": "ack",
+                        "turn_id": turn_id,
+                        "message": "end_audio",
+                    })
+                    continue
+                buffer["ended"] = True
+                ended_turns.add(turn_id)
+                if len(ended_turns) > 32:
+                    ended_turns.clear()
                 end_ms = int((time.perf_counter() - buffer["start"]) * 1000)
                 print(
                     "[ws] end_audio_ms="
@@ -708,14 +771,15 @@ async def interaction_ws(websocket: WebSocket):
                 # WS streaming ASR test path (fallback on end_audio)
                 asr_result = await asr_adapter.finalize(turn_id)
                 if asr_result.get("status") == "success" and asr_result.get("text"):
-                    await send({
-                        "type": "partial_asr",
-                        "turn_id": turn_id,
-                        "text": asr_result.get("text"),
-                        "mock": False,
-                        "source": asr_result.get("source", "asr_fallback"),
-                        "phase": "final",
-                    })
+                    if not asr_result.get("final_already_sent"):
+                        await send({
+                            "type": "partial_asr",
+                            "turn_id": turn_id,
+                            "text": asr_result.get("text"),
+                            "mock": False,
+                            "source": asr_result.get("source", "asr_fallback"),
+                            "phase": "final",
+                        })
                     if sequence_task:
                         sequence_task.cancel()
                     sequence_task = asyncio.create_task(
@@ -754,9 +818,10 @@ async def interaction_ws(websocket: WebSocket):
                         "reason": "asr_empty",
                     })
                     print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=error stage=asr_empty")
-                audio_buffers.pop(turn_id, None)
-                turn_modes.pop(turn_id, None)
-                turn_tokens.pop(turn_id, None)
+                if asr_result.get("status") != "success" or not asr_result.get("text"):
+                    audio_buffers.pop(turn_id, None)
+                    turn_modes.pop(turn_id, None)
+                    turn_tokens.pop(turn_id, None)
                 continue
 
             await send({

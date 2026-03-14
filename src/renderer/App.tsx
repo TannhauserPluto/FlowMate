@@ -275,6 +275,8 @@ const App: React.FC = () => {
   const [breakRemainingSeconds, setBreakRemainingSeconds] = useState(BREAK_DEFAULT_SECONDS);
   const [breakMessage, setBreakMessage] = useState(BREAK_DEFAULT_MESSAGE);
   const breakTimerRef = useRef<number | null>(null);
+  const [breakPhase, setBreakPhase] = useState<'rest_idle' | 'rest_stretching' | 'rest_fact_speaking'>('rest_idle');
+  const breakPhaseRef = useRef<'rest_idle' | 'rest_stretching' | 'rest_fact_speaking'>('rest_idle');
   const focusSessionIdRef = useRef<string | null>(null);
   const focusTaskTextRef = useRef('');
   const screenStreamRef = useRef<MediaStream | null>(null);
@@ -316,35 +318,63 @@ const App: React.FC = () => {
   const wsAudioStateRef = useRef<{
     id: number;
     socket: WebSocket | null;
+    turnId: string | null;
     recorder: MediaRecorder | null;
     stream: MediaStream | null;
+    pcmContext: AudioContext | null;
+    pcmProcessor: ScriptProcessorNode | null;
+    pcmSource: MediaStreamAudioSourceNode | null;
+    pcmWorkletNode: AudioWorkletNode | null;
+    pcmActive: boolean;
     stopTimer: number | null;
     audio: HTMLAudioElement | null;
     stopRequested: boolean;
     useUi: boolean;
     watchdogTimer: number | null;
+    turnActive: boolean;
+    ttsDone: boolean;
+    pendingAudio: number;
+    endAudioSent: boolean;
   }>({
     id: 0,
     socket: null,
+    turnId: null,
     recorder: null,
     stream: null,
+    pcmContext: null,
+    pcmProcessor: null,
+    pcmSource: null,
+    pcmWorkletNode: null,
+    pcmActive: false,
     stopTimer: null,
     audio: null,
     stopRequested: false,
     useUi: false,
     watchdogTimer: null,
+    turnActive: false,
+    ttsDone: false,
+    pendingAudio: 0,
+    endAudioSent: false,
   });
   const speakChunksStateRef = useRef<{
     id: number;
     controller: AbortController | null;
     audio: HTMLAudioElement | null;
   }>({ id: 0, controller: null, audio: null });
-  const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
+  const [avatarSpeechState, setAvatarSpeechState] = useState<'idle' | 'speaking' | 'speaking_hold'>('idle');
   const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastViewRef = useRef<View | null>(null);
   const currentViewRef = useRef<View>(currentView);
   const [breakStretchPlayed, setBreakStretchPlayed] = useState(false);
   const [breakStretchQueued, setBreakStretchQueued] = useState(false);
+  const BREAK_FACTS = [
+    '蜂鸟是唯一能向后飞的鸟。',
+    '章鱼有三颗心脏。',
+    '人类眨眼的速度比眨眼的频率更快。',
+    '海獭睡觉时会牵着手防止漂走。',
+    '香蕉其实属于浆果。',
+    '猫能发出超过100种不同的声音。',
+  ];
 
   const [todoItems, setTodoItems] = useState<TodoItem[]>(() => initialTodoState?.todoItems ?? []);
   const [doneItems, setDoneItems] = useState<TodoItem[]>(() => initialTodoState?.doneItems ?? []);
@@ -615,11 +645,11 @@ const App: React.FC = () => {
     setIsAwaitingRestDecision(false);
     const nextMessage = message ?? BREAK_DEFAULT_MESSAGE;
     setBreakMessage(nextMessage);
-    setBreakStretchQueued(false);
+    setBreakStretchQueued(true);
     setBreakStretchPlayed(false);
+    setBreakPhase('rest_stretching');
     setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
     setCurrentView('break');
-    speakText(nextMessage, 'break_message');
   };
 
   const finishBreak = () => {
@@ -701,20 +731,41 @@ const App: React.FC = () => {
     if (audioPlayerRef.current && !audioEventsBoundRef.current) {
       const audio = audioPlayerRef.current;
       audioEventsBoundRef.current = true;
-      audio.addEventListener('play', () => setIsAvatarSpeaking(true));
-      audio.addEventListener('ended', () => {
-        setIsAvatarSpeaking(false);
-        if (currentViewRef.current === 'break') {
-          setBreakStretchQueued(true);
-          setBreakStretchPlayed(false);
+      const handleAudioEnd = () => {
+        const isWsAudio = audio.dataset.source === 'ws_audio';
+        const audioRunId = audio.dataset.wsRunId ? Number(audio.dataset.wsRunId) : null;
+        if (isWsAudio && audioRunId !== wsAudioStateRef.current.id) {
+          return;
         }
+        if (isWsAudio) {
+          if (wsAudioStateRef.current.turnActive) {
+            if (wsAudioStateRef.current.pendingAudio > 0) {
+              setAvatarSpeechState('speaking');
+              return;
+            }
+            if (!wsAudioStateRef.current.ttsDone && wsAudioStateRef.current.pendingAudio === 0) {
+              setAvatarSpeechState('speaking_hold');
+              return;
+            }
+          }
+          setAvatarSpeechState('idle');
+          return;
+        }
+        if (currentViewRef.current === 'break' && breakPhaseRef.current === 'rest_fact_speaking') {
+          setBreakPhase('rest_idle');
+        }
+        setAvatarSpeechState('idle');
+      };
+      audio.addEventListener('play', () => setAvatarSpeechState('speaking'));
+      audio.addEventListener('ended', () => {
+        handleAudioEnd();
       });
       audio.addEventListener('pause', () => {
         if (audio.ended || audio.currentTime === 0) {
-          setIsAvatarSpeaking(false);
+          handleAudioEnd();
         }
       });
-      audio.addEventListener('error', () => setIsAvatarSpeaking(false));
+      audio.addEventListener('error', () => setAvatarSpeechState('idle'));
     }
     return audioPlayerRef.current;
   };
@@ -759,6 +810,8 @@ const App: React.FC = () => {
       return;
     }
     const audio = ensureAudioPlayer();
+    audio.dataset.source = 'other';
+    audio.dataset.wsRunId = '';
     let blob = await response.blob();
     if (!blob.type) {
       const buffer = await blob.arrayBuffer();
@@ -821,6 +874,8 @@ const App: React.FC = () => {
     const mime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
     const audio = ensureAudioPlayer();
     const dataUrl = `data:${mime};base64,${base64}`;
+    audio.dataset.source = 'other';
+    audio.dataset.wsRunId = '';
     console.log('[audio] src_set', { source, text, audio_len: base64.length });
     audio.pause();
     audio.currentTime = 0;
@@ -841,6 +896,8 @@ const App: React.FC = () => {
       : url.startsWith('/api')
         ? url
         : `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+    audio.dataset.source = 'other';
+    audio.dataset.wsRunId = '';
     console.log('[audio] src_set', { source, url: src });
     audio.src = src;
     try {
@@ -1435,16 +1492,40 @@ const App: React.FC = () => {
   };
 
   const sendTextIntent = async (text: string) => {
-    const response = await fetch(`${API_BASE}/interaction/intent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-    if (!response.ok) {
-      throw new Error('Intent request failed');
+    const cleaned = sanitizeText(text);
+    if (!cleaned) return null;
+    const interaction = await requestIntent(cleaned);
+    if (interaction?.type === 'chat' && isHomeView) {
+      let accumulated = '';
+      await runChatStream(cleaned, {
+        logPrefix: 'text-stream',
+        onStreamStart: () => {
+          setHomeChatBubble('');
+        },
+        onPartial: (chunk) => {
+          accumulated += chunk;
+          const nextText = sanitizeText(accumulated);
+          if (nextText) {
+            setHomeChatBubble(wrapTextByWidth(nextText));
+          }
+        },
+        onDone: async () => {
+          const finalText = sanitizeText(accumulated);
+          if (finalText) {
+            setHomeChatBubble(wrapTextByWidth(finalText));
+            void speakText(finalText, 'home_text_stream');
+          }
+        },
+        onError: () => {
+          const finalText = sanitizeText(accumulated);
+          if (finalText) {
+            setHomeChatBubble(wrapTextByWidth(finalText));
+          }
+        },
+      });
+      return interaction;
     }
-    const interaction = await response.json();
-    await applyInteraction(interaction, text);
+    await applyInteraction(interaction, cleaned);
     return interaction;
   };
 
@@ -1931,7 +2012,7 @@ const App: React.FC = () => {
   };
 
   // WS audio full loop test path (audio -> ASR fallback -> LLM -> chunked TTS)
-    const runWsAudioTest = async (
+  const runWsAudioTest = async (
       durationMs = 3000,
       chunkMs = 300,
       message = 'ws audio test',
@@ -1959,6 +2040,15 @@ const App: React.FC = () => {
       let intentCheckInFlight = false;
       let skipWsChat = false;
     const watchdogMs = 30000;
+    const closeWsAudio = (reason: string) => {
+      const ws = wsAudioStateRef.current.socket;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      console.log('[ws-audio] ws_close_called', {
+        turnId: wsAudioStateRef.current.turnId,
+        reason,
+      });
+      ws.close(1000, reason);
+    };
     const clearWatchdog = () => {
       if (wsAudioStateRef.current.watchdogTimer) {
         window.clearTimeout(wsAudioStateRef.current.watchdogTimer);
@@ -1976,10 +2066,8 @@ const App: React.FC = () => {
         if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
           wsAudioStateRef.current.recorder.stop();
         }
-        if (wsAudioStateRef.current.socket?.readyState === WebSocket.OPEN) {
-          wsAudioStateRef.current.socket.close(1000, 'watchdog_timeout');
-        }
-        setIsAvatarSpeaking(false);
+        closeWsAudio('watchdog_timeout');
+        setAvatarSpeechState('idle');
         if (useUi) {
           const hint = '响应超时，请重试。';
           setChatAssistantText(hint);
@@ -2005,15 +2093,23 @@ const App: React.FC = () => {
         endThinkingOnce();
         if (audioQueue.size > 0) {
           audioQueue.clear();
+          updateAudioQueueState();
+          console.log('[ws-audio] audio_queue_cleared', { reason: 'breakdown' });
         }
         if (audioPlayer) {
           audioPlayer.pause();
           audioPlayer.currentTime = 0;
           audioPlayer.src = '';
+          audioPlayer.dataset.source = 'other';
+          audioPlayer.dataset.wsRunId = '';
         }
+        setAvatarSpeechState('idle');
+        wsAudioStateRef.current.turnActive = false;
+        wsAudioStateRef.current.pendingAudio = 0;
+        wsAudioStateRef.current.ttsDone = false;
         if (socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: 'cancel_turn', turn_id: turnId }));
-          socket.close(1000, 'breakdown');
+          closeWsAudio('breakdown');
         }
       };
       if (useUi) {
@@ -2027,8 +2123,16 @@ const App: React.FC = () => {
     wsAudioStateRef.current.id = runId;
     wsAudioStateRef.current.stopRequested = false;
     wsAudioStateRef.current.useUi = useUi;
+    wsAudioStateRef.current.turnActive = true;
+    wsAudioStateRef.current.ttsDone = false;
+    wsAudioStateRef.current.pendingAudio = 0;
+    wsAudioStateRef.current.endAudioSent = false;
     clearWatchdog();
     if (wsAudioStateRef.current.socket) {
+      console.log('[ws-audio] ws_close_called', {
+        turnId: wsAudioStateRef.current.turnId,
+        reason: 'replaced',
+      });
       wsAudioStateRef.current.socket.close(1000, 'replaced');
     }
     if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
@@ -2045,12 +2149,15 @@ const App: React.FC = () => {
       wsAudioStateRef.current.audio.pause();
       wsAudioStateRef.current.audio.currentTime = 0;
       wsAudioStateRef.current.audio.src = '';
+      wsAudioStateRef.current.audio.dataset.source = 'other';
+      wsAudioStateRef.current.audio.dataset.wsRunId = '';
       wsAudioStateRef.current.audio = null;
     }
 
     const socket = new WebSocket(buildWsUrl('/interaction/ws'));
     wsAudioStateRef.current.socket = socket;
     const turnId = `turn-audio-${Date.now()}`;
+    wsAudioStateRef.current.turnId = turnId;
     let firstChunkLogged = false;
     let totalChunks = 0;
     let pendingSends = 0;
@@ -2062,17 +2169,44 @@ const App: React.FC = () => {
     let firstAudioPlayLogged = false;
     let finalAudioPlayLogged = false;
     let expectedSeq = 0;
+    let seq = 0;
+    let lastStableAsrText = '';
+    let currentPlayingSeq: number | null = null;
     const audioQueue = new Map<number, { audio: string; format?: string; text?: string }>();
     const audioPlayer = ensureAudioPlayer();
     wsAudioStateRef.current.audio = audioPlayer;
+    const updateAudioQueueState = () => {
+      wsAudioStateRef.current.pendingAudio = audioQueue.size;
+    };
+    const isNoisyPartial = (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return true;
+      if (/^\d$/.test(trimmed)) return true;
+      if (/^\d{1,2}$/.test(trimmed)) return true;
+      const hasLetters = /[A-Za-z\u4e00-\u9fff]/.test(trimmed);
+      if (!hasLetters && trimmed.length <= 1) return true;
+      return false;
+    };
 
-    const maybeSendEnd = () => {
+    const sendEndAudioOnce = (reason: string) => {
+      const alreadySent = wsAudioStateRef.current.endAudioSent;
+      console.log('[ws-audio] end_audio_send_attempt', { turnId, alreadySent, reason });
+      if (alreadySent) {
+        console.log('[ws-audio] end_audio_send_skipped_duplicate', { turnId, reason });
+        return;
+      }
+      if (socket.readyState !== WebSocket.OPEN) return;
+      wsAudioStateRef.current.endAudioSent = true;
+      socket.send(JSON.stringify({ type: 'end_audio', turn_id: turnId }));
+      console.log('[ws-audio] end_audio_sent', { turnId, reason });
+      triggerWatchdog('await_done');
+    };
+
+    const maybeSendEnd = (reason: string) => {
       if (!allowEnd) return;
       if (!wsAudioStateRef.current.stopRequested || pendingSends > 0) return;
-      if (socket.readyState !== WebSocket.OPEN) return;
       startThinkingOnce();
-      socket.send(JSON.stringify({ type: 'end_audio', turn_id: turnId }));
-      triggerWatchdog('await_done');
+      sendEndAudioOnce(reason);
     };
 
     const blobToBase64 = async (blob: Blob) => {
@@ -2084,12 +2218,43 @@ const App: React.FC = () => {
       }
       return btoa(binary);
     };
+    const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 1) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    };
+    const resampleTo16k = (input: Float32Array, inputRate: number) => {
+      if (inputRate === 16000) return input;
+      const ratio = inputRate / 16000;
+      const length = Math.max(1, Math.floor(input.length / ratio));
+      const output = new Float32Array(length);
+      for (let i = 0; i < length; i += 1) {
+        const origin = i * ratio;
+        const left = Math.floor(origin);
+        const right = Math.min(left + 1, input.length - 1);
+        const weight = origin - left;
+        output[i] = input[left] * (1 - weight) + input[right] * weight;
+      }
+      return output;
+    };
+    const floatToInt16 = (input: Float32Array) => {
+      const output = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i += 1) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return output;
+    };
 
     socket.addEventListener('open', async () => {
       if (wsAudioStateRef.current.id !== runId) {
-        socket.close(1000, 'stale');
+        closeWsAudio('stale');
         return;
       }
+      console.log('[ws-audio] ws_open', { turnId });
       if (useUi) {
         console.log('[ws-audio] ws_connect_ms', Math.round(performance.now() - requestStart));
       }
@@ -2105,7 +2270,7 @@ const App: React.FC = () => {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       } catch (error) {
         console.warn('[ws-audio] getUserMedia failed', error);
-        socket.close(1000, 'mic_failed');
+        closeWsAudio('mic_failed');
         if (useUi) {
           console.warn('[ws-audio] fallback_triggered');
           startRecording(sendVoiceIntent);
@@ -2115,24 +2280,266 @@ const App: React.FC = () => {
 
       if (wsAudioStateRef.current.id !== runId) {
         stream.getTracks().forEach((track) => track.stop());
-        socket.close(1000, 'stale');
+        closeWsAudio('stale');
+        return;
+      }
+      wsAudioStateRef.current.stream = stream;
+
+      const stopPcmCapture = async () => {
+        if (!wsAudioStateRef.current.pcmActive) return;
+        wsAudioStateRef.current.pcmActive = false;
+        const processor = wsAudioStateRef.current.pcmProcessor;
+        const source = wsAudioStateRef.current.pcmSource;
+        const workletNode = wsAudioStateRef.current.pcmWorkletNode;
+        const context = wsAudioStateRef.current.pcmContext;
+        wsAudioStateRef.current.pcmProcessor = null;
+        wsAudioStateRef.current.pcmSource = null;
+        wsAudioStateRef.current.pcmWorkletNode = null;
+        wsAudioStateRef.current.pcmContext = null;
+        try {
+          if (workletNode?.port) {
+            workletNode.port.postMessage({ type: 'flush' });
+            await new Promise((resolve) => window.setTimeout(resolve, 20));
+          }
+          if (socket.readyState === WebSocket.OPEN) {
+            flushPendingPcm(true);
+          }
+          processor?.disconnect();
+          source?.disconnect();
+          workletNode?.port?.close?.();
+          workletNode?.disconnect();
+        } catch {
+          // ignore
+        }
+        try {
+          wsAudioStateRef.current.stream?.getTracks().forEach((track) => track.stop());
+        } catch {
+          // ignore
+        }
+        wsAudioStateRef.current.stream = null;
+        setIsRecording(false);
+        try {
+          await context?.close();
+        } catch {
+          // ignore
+        }
+      };
+
+      const enablePcmCapture = useUi && isHomeView;
+      let pcmInitOk = false;
+      const pcmChunkSize = 1024;
+      const pcmSendTargetFrames = 1600;
+      const pcmSendTargetBytes = pcmSendTargetFrames * 2;
+      const pcmSendTargetMs = Math.round((pcmSendTargetFrames / 16000) * 1000);
+      let pendingPcm = new Int16Array(0);
+      const sendPcmChunkNow = (pcm16: Int16Array) => {
+        if (!pcm16.length) return;
+        try {
+          pendingSends += 1;
+          if (!firstChunkLogged) {
+            firstChunkLogged = true;
+            console.log('[ws-audio] first_audio_chunk_sent_ms', Math.round(performance.now() - requestStart));
+          }
+          totalChunks += 1;
+          const currentSeq = seq;
+          seq += 1;
+          socket.send(JSON.stringify({
+            type: 'audio_chunk',
+            turn_id: turnId,
+            seq: currentSeq,
+            audio: arrayBufferToBase64(pcm16.buffer),
+            mime_type: 'audio/pcm;codec=s16le',
+            sample_rate: 16000,
+            mock: false,
+          }));
+          console.log('[ws-audio] audio_chunk_sent', { seq: currentSeq, bytes: pcm16.byteLength });
+        } catch (error) {
+          console.warn('[ws-audio] pcm_chunk_send_failed', error);
+        } finally {
+          pendingSends -= 1;
+          maybeSendEnd('pcm_chunk_sent');
+        }
+      };
+      const flushPendingPcm = (force: boolean) => {
+        while (pendingPcm.length >= pcmSendTargetFrames || (force && pendingPcm.length > 0)) {
+          const frames = pendingPcm.length >= pcmSendTargetFrames ? pcmSendTargetFrames : pendingPcm.length;
+          const chunk = new Int16Array(frames);
+          chunk.set(pendingPcm.subarray(0, frames));
+          sendPcmChunkNow(chunk);
+          if (pendingPcm.length <= frames) {
+            pendingPcm = new Int16Array(0);
+          } else {
+            pendingPcm = pendingPcm.subarray(frames);
+          }
+        }
+      };
+      const queuePcmChunk = (pcm16: Int16Array, forceFlush = false) => {
+        if (pcm16.length) {
+          if (!pendingPcm.length) {
+            pendingPcm = pcm16.slice();
+          } else {
+            const merged = new Int16Array(pendingPcm.length + pcm16.length);
+            merged.set(pendingPcm, 0);
+            merged.set(pcm16, pendingPcm.length);
+            pendingPcm = merged;
+          }
+        }
+        flushPendingPcm(forceFlush);
+      };
+
+      if (enablePcmCapture) {
+        try {
+          const AudioContextRef = window.AudioContext || (window as any).webkitAudioContext;
+          const context = new AudioContextRef({ sampleRate: 16000 });
+          if (!context.audioWorklet) {
+            throw new Error('audioWorklet_unavailable');
+          }
+          await context.audioWorklet.addModule(new URL('./worklets/pcm-worklet.ts', import.meta.url));
+          const actualRate = context.sampleRate;
+          console.log('[ws-audio] audio_worklet_init_ok');
+          console.log('[ws-audio] pcm_capture_init_ok');
+          console.log('[ws-audio] pcm_sample_rate', { actual: actualRate, target: 16000 });
+          console.log('[ws-audio] pcm_chunk_size', {
+            capture_frames: pcmChunkSize,
+            send_target_frames: pcmSendTargetFrames,
+            send_target_bytes: pcmSendTargetBytes,
+            approx_ms: pcmSendTargetMs,
+          });
+          const source = context.createMediaStreamSource(stream);
+          const workletNode = new AudioWorkletNode(context, 'pcm-capture', {
+            processorOptions: { chunkSize: pcmChunkSize },
+          });
+          const silence = context.createGain();
+          silence.gain.value = 0;
+          workletNode.port.onmessage = (event) => {
+            if (wsAudioStateRef.current.id !== runId) return;
+            if (socket.readyState !== WebSocket.OPEN) return;
+            const payload = event.data as { type?: string; buffer?: ArrayBuffer };
+            if (!payload?.type || !payload.buffer) return;
+            if (!wsAudioStateRef.current.pcmActive && payload.type !== 'flush') return;
+            if (wsAudioStateRef.current.stopRequested && payload.type !== 'flush') return;
+            const floatData = new Float32Array(payload.buffer);
+            const resampled = resampleTo16k(floatData, actualRate);
+            const pcm16 = floatToInt16(resampled);
+            if (payload.type === 'flush') {
+              if (floatData.length) {
+                console.log('[ws-audio] pcm_tail_flush', {
+                  frames: floatData.length,
+                  resampled_frames: resampled.length,
+                });
+                console.log('[ws-audio] final_audio_chunk_sent_ms', Math.round(performance.now() - requestStart));
+              }
+              queuePcmChunk(pcm16, true);
+              return;
+            }
+            queuePcmChunk(pcm16);
+          };
+          source.connect(workletNode);
+          workletNode.connect(silence);
+          silence.connect(context.destination);
+          await context.resume().catch(() => {});
+          wsAudioStateRef.current.pcmContext = context;
+          wsAudioStateRef.current.pcmSource = source;
+          wsAudioStateRef.current.pcmWorkletNode = workletNode;
+          wsAudioStateRef.current.pcmActive = true;
+          pcmInitOk = true;
+          recorderStarted = true;
+          setIsRecording(true);
+        } catch (error) {
+          console.warn('[ws-audio] audio_worklet_init_failed', error);
+          console.warn('[ws-audio] audio_worklet_fallback_triggered');
+          await stopPcmCapture();
+        }
+      }
+
+      if (pcmInitOk) {
+        if (durationMs > 0) {
+          wsAudioStateRef.current.stopTimer = window.setTimeout(() => {
+          wsAudioStateRef.current.stopRequested = true;
+            stopPcmCapture().finally(() => {
+              maybeSendEnd('pcm_stop_timer');
+            });
+          }, durationMs);
+        }
         return;
       }
 
-      const recorder = new MediaRecorder(stream);
+      if (enablePcmCapture) {
+        try {
+          const AudioContextRef = window.AudioContext || (window as any).webkitAudioContext;
+          const context = new AudioContextRef({ sampleRate: 16000 });
+          const actualRate = context.sampleRate;
+          console.log('[ws-audio] pcm_capture_init_ok');
+          console.log('[ws-audio] pcm_sample_rate', { actual: actualRate, target: 16000 });
+          console.log('[ws-audio] pcm_chunk_size', {
+            capture_frames: pcmChunkSize,
+            send_target_frames: pcmSendTargetFrames,
+            send_target_bytes: pcmSendTargetBytes,
+            approx_ms: pcmSendTargetMs,
+          });
+          const source = context.createMediaStreamSource(stream);
+          const processor = context.createScriptProcessor(pcmChunkSize, 1, 1);
+          const silence = context.createGain();
+          silence.gain.value = 0;
+          processor.onaudioprocess = (event) => {
+            if (wsAudioStateRef.current.id !== runId) return;
+            if (!wsAudioStateRef.current.pcmActive) return;
+            if (wsAudioStateRef.current.stopRequested) return;
+            if (socket.readyState !== WebSocket.OPEN) return;
+            const input = event.inputBuffer.getChannelData(0);
+            const resampled = resampleTo16k(input, actualRate);
+            const pcm16 = floatToInt16(resampled);
+            queuePcmChunk(pcm16);
+          };
+          source.connect(processor);
+          processor.connect(silence);
+          silence.connect(context.destination);
+          wsAudioStateRef.current.pcmContext = context;
+          wsAudioStateRef.current.pcmSource = source;
+          wsAudioStateRef.current.pcmProcessor = processor;
+          wsAudioStateRef.current.pcmActive = true;
+          recorderStarted = true;
+          setIsRecording(true);
+          pcmInitOk = true;
+        } catch (error) {
+          console.warn('[ws-audio] pcm_capture_init_failed', error);
+          console.warn('[ws-audio] pcm_capture_fallback_triggered');
+          await stopPcmCapture();
+        }
+      }
+
+      const preferredMimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm;codecs=pcm',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/ogg',
+      ];
+      const selectedMimeType = preferredMimeTypes.find((type) =>
+        MediaRecorder.isTypeSupported(type),
+      ) || '';
+      const recorder = selectedMimeType
+        ? new MediaRecorder(stream, { mimeType: selectedMimeType })
+        : new MediaRecorder(stream);
       wsAudioStateRef.current.recorder = recorder;
       wsAudioStateRef.current.stream = stream;
       recorderStarted = true;
-      let seq = 0;
-      const mimeType = recorder.mimeType || 'audio/webm';
+      let mediaSeq = 0;
+      const mimeType = recorder.mimeType || selectedMimeType || 'audio/webm';
+      const codecMatch = mimeType.match(/codecs=([^;]+)/);
+      console.log('[ws-audio] recorder_mime', {
+        selected: selectedMimeType || 'default',
+        actual: mimeType,
+      });
+      console.log('[ws-audio] recorder_codec', { codec: codecMatch ? codecMatch[1] : 'unknown' });
 
       recorder.ondataavailable = async (event) => {
         if (wsAudioStateRef.current.id !== runId) return;
         if (!event.data || event.data.size === 0) return;
         if (socket.readyState !== WebSocket.OPEN) return;
         pendingSends += 1;
-        const currentSeq = seq;
-        seq += 1;
+        const currentSeq = mediaSeq;
+        mediaSeq += 1;
         try {
           const audio = await blobToBase64(event.data);
           if (!firstChunkLogged) {
@@ -2152,7 +2559,7 @@ const App: React.FC = () => {
           console.warn('[ws-audio] chunk_encode_failed', error);
         } finally {
           pendingSends -= 1;
-          maybeSendEnd();
+          maybeSendEnd('media_chunk_sent');
         }
       };
 
@@ -2165,7 +2572,7 @@ const App: React.FC = () => {
         setIsRecording(false);
         console.log('[ws-audio] ws_audio_record_stop_ms', Math.round(performance.now() - requestStart));
         console.log('[ws-audio] total_chunks_sent', totalChunks);
-        maybeSendEnd();
+        maybeSendEnd('recorder_stop');
       };
 
       recorder.start(chunkMs);
@@ -2179,9 +2586,22 @@ const App: React.FC = () => {
       }
     });
 
-    socket.addEventListener('close', () => {
+    socket.addEventListener('close', (event) => {
       if (wsAudioStateRef.current.id !== runId) return;
+      const closeReason = event?.reason || 'socket_close';
+      console.log('[ws-audio] ws_onclose', {
+        turnId,
+        code: event?.code,
+        reason: closeReason,
+        hadFirstAudioChunk: firstAudioChunkReceivedLogged,
+      });
+      console.log('[ws-audio] turn_cleanup', { turnId, reason: closeReason });
       clearWatchdog();
+      if (audioQueue.size > 0) {
+        audioQueue.clear();
+        updateAudioQueueState();
+        console.log('[ws-audio] audio_queue_cleared', { reason: 'socket_close' });
+      }
       if (wsAudioStateRef.current.stopTimer) {
         window.clearTimeout(wsAudioStateRef.current.stopTimer);
         wsAudioStateRef.current.stopTimer = null;
@@ -2192,20 +2612,38 @@ const App: React.FC = () => {
       if (wsAudioStateRef.current.stream) {
         wsAudioStateRef.current.stream.getTracks().forEach((track) => track.stop());
       }
+      if (wsAudioStateRef.current.pcmActive) {
+        wsAudioStateRef.current.stopRequested = true;
+        wsAudioStateRef.current.pcmActive = false;
+        wsAudioStateRef.current.pcmProcessor?.disconnect();
+        wsAudioStateRef.current.pcmSource?.disconnect();
+        wsAudioStateRef.current.pcmContext?.close().catch(() => {});
+        wsAudioStateRef.current.pcmProcessor = null;
+        wsAudioStateRef.current.pcmSource = null;
+        wsAudioStateRef.current.pcmContext = null;
+      }
       if (wsAudioStateRef.current.audio) {
         wsAudioStateRef.current.audio.pause();
         wsAudioStateRef.current.audio.currentTime = 0;
         wsAudioStateRef.current.audio.src = '';
+        wsAudioStateRef.current.audio.dataset.source = 'other';
+        wsAudioStateRef.current.audio.dataset.wsRunId = '';
       }
       wsAudioStateRef.current.recorder = null;
       wsAudioStateRef.current.stream = null;
+      wsAudioStateRef.current.pcmActive = false;
       wsAudioStateRef.current.socket = null;
+      wsAudioStateRef.current.turnId = null;
       wsAudioStateRef.current.audio = null;
       wsAudioStateRef.current.stopRequested = false;
       wsAudioStateRef.current.useUi = false;
       wsAudioStateRef.current.watchdogTimer = null;
+      wsAudioStateRef.current.turnActive = false;
+      wsAudioStateRef.current.ttsDone = false;
+      wsAudioStateRef.current.pendingAudio = 0;
+      wsAudioStateRef.current.endAudioSent = false;
       setIsRecording(false);
-      setIsAvatarSpeaking(false);
+      setAvatarSpeechState('idle');
       endThinkingOnce();
     });
 
@@ -2225,40 +2663,60 @@ const App: React.FC = () => {
             console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
           }
           console.log('[ws-audio] partial_asr', payload.text);
-          if (useUi && payload?.text) {
-            setChatUserText(payload.text);
-          }
           const asrText = String(payload?.text ?? '').trim();
           const isFinal = payload?.phase === 'final';
+          const noisyPartial = isNoisyPartial(asrText);
+          if (isFinal) {
+            console.log('[ws-audio] final_asr_ms', Math.round(performance.now() - requestStart));
+          }
+          if (useUi) {
+            if (isFinal) {
+              const finalText = (!noisyPartial && asrText) ? asrText : lastStableAsrText;
+              if (finalText) {
+                setChatUserText(finalText);
+                lastStableAsrText = finalText;
+              }
+            } else if (asrText && !noisyPartial) {
+              setChatUserText(asrText);
+              lastStableAsrText = asrText;
+            } else if (asrText && noisyPartial) {
+              console.log('[ws-audio] partial_asr_suppressed', { text: asrText });
+            }
+          }
+          const effectiveText = isFinal
+            ? ((asrText && !noisyPartial) ? asrText : lastStableAsrText)
+            : '';
           if (
             useUi &&
             isHomeView &&
             isFinal &&
-            asrText &&
+            effectiveText &&
             !intentCheckInFlight &&
             !skipWsChat
           ) {
             intentCheckInFlight = true;
-            const snippet = asrText.replace(/\s+/g, ' ').slice(0, 80);
+            const snippet = effectiveText.replace(/\s+/g, ' ').slice(0, 80);
+            console.log('[ws-audio] intent_request_start', { turnId, text: snippet });
             console.log('[ws-audio] intent_check_start', { text: snippet });
             void (async () => {
               try {
-                const interaction = await requestIntent(asrText);
+                const interaction = await requestIntent(effectiveText);
                 const intent = interaction?.type ?? 'unknown';
                 console.log('[ws-audio] intent_check_result', { intent });
                 if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
                   console.log('[ws-audio] memo_saved');
-                  await applyInteraction(interaction, asrText);
+                  await applyInteraction(interaction, effectiveText);
                 }
                 if (interaction?.type === 'breakdown') {
                   console.log('[ws-audio] breakdown_triggered');
-                  await applyInteraction(interaction, asrText);
+                  await applyInteraction(interaction, effectiveText);
                   suppressWsChatForBreakdown('intent_breakdown');
                 }
               } catch (error) {
                 console.warn('[ws-audio] intent_check_failed', error);
               } finally {
                 intentCheckInFlight = false;
+                console.log('[ws-audio] intent_request_end', { turnId });
               }
             })();
           }
@@ -2293,8 +2751,9 @@ const App: React.FC = () => {
           console.log('[ws-audio] audio_chunk_received', {
             seq,
             text: payload.text,
-            audio_len: typeof payload.audio === 'string' ? payload.audio.length : 0,
+            len: typeof payload.audio === 'string' ? payload.audio.length : 0,
             source: payload.source,
+            turnId,
           });
           if (!firstAudioChunkReceivedLogged) {
             firstAudioChunkReceivedLogged = true;
@@ -2310,13 +2769,23 @@ const App: React.FC = () => {
           format: payload.format,
           text: payload.text,
         });
+        updateAudioQueueState();
+        console.log('[ws-audio] audio_chunk_enqueued', { seq, queueLength: audioQueue.size });
 
         const playNext = async () => {
-          if (audioPlayer.src && !audioPlayer.paused) return;
+          const isPlaying = Boolean(audioPlayer.src) && !audioPlayer.paused;
+          console.log('[ws-audio] audio_playback_start_attempt', {
+            seq: expectedSeq,
+            queueLength: audioQueue.size,
+            isPlaying,
+            avatarSpeechState,
+          });
+          if (isPlaying) return;
             const next = audioQueue.get(expectedSeq);
             if (!next) return;
             audioQueue.delete(expectedSeq);
             expectedSeq += 1;
+            updateAudioQueueState();
             console.log('[ws-audio] audio_chunk_play', {
               seq: expectedSeq - 1,
               text: next.text,
@@ -2329,40 +2798,62 @@ const App: React.FC = () => {
               text: next.text,
               audio_len: typeof next.audio === 'string' ? next.audio.length : 0,
             });
+            audioPlayer.dataset.source = 'ws_audio';
+            audioPlayer.dataset.wsRunId = String(runId);
             audioPlayer.src = `data:${mime};base64,${next.audio}`;
             audioPlayer.currentTime = 0;
+            setAvatarSpeechState('speaking');
+            const playSeq = expectedSeq - 1;
+            currentPlayingSeq = playSeq;
             if (!firstAudioPlayLogged) {
               firstAudioPlayLogged = true;
               console.log('[ws-audio] first_audio_play_start_ms', Math.round(performance.now() - requestStart));
             }
             try {
-              console.log('[audio] play', { source: 'ws_audio', seq: expectedSeq - 1, text: next.text });
+              console.log('[audio] play', { source: 'ws_audio', seq: playSeq, text: next.text });
               await audioPlayer.play();
+              console.log('[ws-audio] audio_playback_started', { seq: playSeq });
           } catch (error) {
             console.warn('[ws-audio] playback_error', error);
+            console.warn('[ws-audio] audio_playback_error', { seq: playSeq, error });
             console.warn('[ws-audio] audio_play_error', error);
             endThinkingOnce();
             if (socket.readyState === WebSocket.OPEN) {
-              socket.close(1000, 'play_error');
+              closeWsAudio('play_error');
             }
             return;
           }
           audioPlayer.onended = () => {
+            if (wsAudioStateRef.current.id !== runId) return;
+            console.log('[ws-audio] audio_playback_ended', {
+              seq: currentPlayingSeq,
+              queueLength: audioQueue.size,
+              turnDone: doneLogged,
+            });
             if (audioQueue.size === 0 && doneLogged && !finalAudioPlayLogged) {
               finalAudioPlayLogged = true;
               console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
             }
+            if (audioQueue.size === 0 && !doneLogged) {
+              setAvatarSpeechState('speaking_hold');
+            } else if (audioQueue.size === 0 && doneLogged) {
+              setAvatarSpeechState('idle');
+              wsAudioStateRef.current.turnActive = false;
+              wsAudioStateRef.current.pendingAudio = 0;
+            }
+            currentPlayingSeq = null;
             playNext();
           };
         };
 
         playNext();
       }
-        if (payload?.type === 'done') {
-          if (!doneLogged) {
-            doneLogged = true;
-            console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
-          }
+      if (payload?.type === 'done') {
+        if (!doneLogged) {
+          doneLogged = true;
+          console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
+        }
+        wsAudioStateRef.current.ttsDone = true;
         clearWatchdog();
         if (audioQueue.size > 0) {
           const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
@@ -2371,6 +2862,9 @@ const App: React.FC = () => {
         if (audioQueue.size === 0 && audioPlayer.paused && !finalAudioPlayLogged) {
           finalAudioPlayLogged = true;
           console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
+          setAvatarSpeechState('idle');
+          wsAudioStateRef.current.turnActive = false;
+          wsAudioStateRef.current.pendingAudio = 0;
         }
         endThinkingOnce();
       }
@@ -2380,6 +2874,10 @@ const App: React.FC = () => {
           console.log('[ws-audio] ws_error_ms', Math.round(performance.now() - requestStart));
         }
         clearWatchdog();
+        setAvatarSpeechState('idle');
+        wsAudioStateRef.current.turnActive = false;
+        wsAudioStateRef.current.pendingAudio = 0;
+        wsAudioStateRef.current.ttsDone = false;
         if (payload?.error_stage === 'tts') {
           console.warn('[ws-audio] tts_error', payload.message);
         }
@@ -2396,7 +2894,7 @@ const App: React.FC = () => {
         allowEnd = false;
         endThinkingOnce();
         if (socket.readyState === WebSocket.OPEN) {
-          socket.close(1000, 'error');
+          closeWsAudio('error');
         }
       }
     });
@@ -2410,24 +2908,91 @@ const App: React.FC = () => {
       allowEnd = false;
       clearWatchdog();
       endThinkingOnce();
+      setAvatarSpeechState('idle');
+      wsAudioStateRef.current.turnActive = false;
+      wsAudioStateRef.current.pendingAudio = 0;
+      wsAudioStateRef.current.ttsDone = false;
       console.warn('[ws-audio] socket_error', event);
       if (useUi && !recorderStarted) {
         console.warn('[ws-audio] fallback_triggered');
         startRecording(sendVoiceIntent);
       }
       if (socket.readyState === WebSocket.OPEN) {
-        socket.close(1000, 'error');
+        closeWsAudio('error');
       }
     });
   };
 
   const stopWsAudioRecording = () => {
+    const sendEndAudioOnce = (reason: string) => {
+      const turnId = wsAudioStateRef.current.turnId;
+      const alreadySent = wsAudioStateRef.current.endAudioSent;
+      console.log('[ws-audio] end_audio_send_attempt', { turnId, alreadySent, reason });
+      if (alreadySent) {
+        console.log('[ws-audio] end_audio_send_skipped_duplicate', { turnId, reason });
+        return;
+      }
+      const ws = wsAudioStateRef.current.socket;
+      if (!ws || ws.readyState !== WebSocket.OPEN || !turnId) return;
+      wsAudioStateRef.current.endAudioSent = true;
+      ws.send(JSON.stringify({
+        type: 'end_audio',
+        turn_id: turnId,
+      }));
+      console.log('[ws-audio] end_audio_sent', { turnId, reason });
+    };
     if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
       wsAudioStateRef.current.stopRequested = true;
       wsAudioStateRef.current.recorder.stop();
       return;
     }
+    if (wsAudioStateRef.current.pcmActive) {
+      wsAudioStateRef.current.stopRequested = true;
+      wsAudioStateRef.current.pcmActive = false;
+      const cleanup = () => {
+        wsAudioStateRef.current.pcmProcessor?.disconnect();
+        wsAudioStateRef.current.pcmSource?.disconnect();
+        wsAudioStateRef.current.pcmWorkletNode?.port?.close?.();
+        wsAudioStateRef.current.pcmWorkletNode?.disconnect();
+        wsAudioStateRef.current.pcmContext?.close().catch(() => {});
+        wsAudioStateRef.current.pcmProcessor = null;
+        wsAudioStateRef.current.pcmSource = null;
+        wsAudioStateRef.current.pcmWorkletNode = null;
+        wsAudioStateRef.current.pcmContext = null;
+        wsAudioStateRef.current.stream?.getTracks().forEach((track) => track.stop());
+        wsAudioStateRef.current.stream = null;
+        setIsRecording(false);
+        if (
+          wsAudioStateRef.current.socket?.readyState === WebSocket.OPEN
+          && wsAudioStateRef.current.turnId
+        ) {
+          sendEndAudioOnce('manual_stop');
+          return;
+        }
+        if (wsAudioStateRef.current.socket?.readyState === WebSocket.OPEN) {
+          console.log('[ws-audio] ws_close_called', {
+            turnId: wsAudioStateRef.current.turnId,
+            reason: 'manual_stop',
+          });
+          wsAudioStateRef.current.socket.close(1000, 'manual_stop');
+        }
+      };
+
+      if (wsAudioStateRef.current.pcmWorkletNode?.port) {
+        wsAudioStateRef.current.pcmWorkletNode.port.postMessage({ type: 'flush' });
+        window.setTimeout(cleanup, 20);
+      } else {
+        cleanup();
+      }
+      return;
+    }
     if (wsAudioStateRef.current.socket) {
+      if (wsAudioStateRef.current.socket.readyState === WebSocket.OPEN) {
+        console.log('[ws-audio] ws_close_called', {
+          turnId: wsAudioStateRef.current.turnId,
+          reason: 'manual_stop',
+        });
+      }
       wsAudioStateRef.current.socket.close(1000, 'manual_stop');
     }
   };
@@ -2672,23 +3237,53 @@ const App: React.FC = () => {
     if (currentView !== 'break') {
       setBreakStretchQueued(false);
       setBreakStretchPlayed(false);
+      setBreakPhase('rest_idle');
     }
   }, [currentView]);
 
   useEffect(() => {
-    if (isBreakView && isAvatarSpeaking) {
+    breakPhaseRef.current = breakPhase;
+  }, [breakPhase]);
+
+  useEffect(() => {
+    if (currentView !== 'break') {
+      if (breakPhaseRef.current !== 'rest_idle') {
+        setBreakPhase('rest_idle');
+      }
+      if (audioPlayerRef.current && !audioPlayerRef.current.paused) {
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current.currentTime = 0;
+        audioPlayerRef.current.src = '';
+      }
+      return;
+    }
+    if (!breakStretchPlayed || breakPhase !== 'rest_stretching') return;
+    if (!BREAK_FACTS.length) {
+      setBreakPhase('rest_idle');
+      return;
+    }
+    const fact = BREAK_FACTS[Math.floor(Math.random() * BREAK_FACTS.length)];
+    setBreakPhase('rest_fact_speaking');
+    void speakText(fact, 'break_fact');
+  }, [currentView, breakStretchPlayed, breakPhase, BREAK_FACTS.length]);
+  const isAvatarSpeaking = avatarSpeechState === 'speaking';
+  const isAvatarHold = avatarSpeechState === 'speaking_hold';
+  const isAvatarSpeechActive = avatarSpeechState !== 'idle';
+
+  useEffect(() => {
+    if (isBreakView && isAvatarSpeechActive) {
       setBreakStretchPlayed(false);
       setBreakStretchQueued(false);
     }
-  }, [isBreakView, isAvatarSpeaking]);
+  }, [isBreakView, isAvatarSpeechActive]);
 
   useEffect(() => {
-    if (primaryView !== 'home' || currentView === 'profile' || isAvatarSpeaking) return;
+    if (primaryView !== 'home' || currentView === 'profile' || isAvatarSpeechActive) return;
     const intervalId = window.setInterval(() => {
       setHomeIdleTick((prev) => prev + 1);
     }, 6000);
     return () => window.clearInterval(intervalId);
-  }, [primaryView, currentView, isAvatarSpeaking]);
+  }, [primaryView, currentView, isAvatarSpeechActive]);
 
   useEffect(() => {
     const video = avatarVideoRef.current;
@@ -2714,7 +3309,7 @@ const App: React.FC = () => {
     }
 
     const returningFromProfile = prevView === 'profile' && currentView !== 'profile';
-    const shouldExitTalk = !isAvatarSpeaking && video.dataset.state === 'talk';
+    const shouldExitTalk = avatarSpeechState === 'idle' && video.dataset.state === 'talk';
     const shouldResetBase = prevView !== currentView || returningFromProfile || shouldExitTalk;
 
     const playAvatar = (state: string, src: string, loop: boolean, restart: boolean) => {
@@ -2734,17 +3329,36 @@ const App: React.FC = () => {
         video.play().catch(() => {});
       }
     };
+    const holdAvatar = () => {
+      if (video.dataset.state !== 'talk') {
+        video.src = vidTalk;
+        video.dataset.state = 'talk';
+      }
+      video.loop = false;
+      try {
+        video.currentTime = 0;
+      } catch {
+        // ignore seek errors
+      }
+      video.pause();
+    };
 
     if (isBreakView) {
       if (isAvatarSpeaking) {
         playAvatar('talk', vidTalk, true, prevView !== currentView || video.dataset.state !== 'talk');
         return;
       }
+      if (isAvatarHold) {
+        holdAvatar();
+        return;
+      }
       if (breakStretchQueued && !breakStretchPlayed) {
         playAvatar('stretch', vidStretch, false, shouldResetBase || video.dataset.state !== 'stretch');
         return;
       }
-      if (shouldResetBase) {
+      if (breakPhase === 'rest_idle') {
+        playAvatar('idle', vidIdle, true, shouldResetBase || video.dataset.state !== 'idle');
+      } else if (shouldResetBase) {
         playAvatar('idle', vidIdle, false, true);
       } else {
         video.pause();
@@ -2755,6 +3369,8 @@ const App: React.FC = () => {
     if (isFocusView) {
       if (isAvatarSpeaking) {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
+      } else if (isAvatarHold) {
+        holdAvatar();
       } else {
         playAvatar('focus', vidFocus, true, shouldResetBase || video.dataset.state !== 'focus');
       }
@@ -2764,6 +3380,10 @@ const App: React.FC = () => {
     if (isTaskRunning || primaryView === 'timer') {
       if (isAvatarSpeaking) {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
+        return;
+      }
+      if (isAvatarHold) {
+        holdAvatar();
         return;
       }
       if (shouldResetBase) {
@@ -2777,19 +3397,24 @@ const App: React.FC = () => {
         playAvatar('talk', vidTalk, true, video.dataset.state !== 'talk');
         return;
       }
+      if (isAvatarHold) {
+        holdAvatar();
+        return;
+      }
       if (shouldResetBase || homeIdleTick > 0) {
         playAvatar('idle', vidIdle, false, true);
       }
     }
   }, [
     currentView,
-    isAvatarSpeaking,
+    avatarSpeechState,
     isBreakView,
     isFocusView,
     isTaskRunning,
     primaryView,
     breakStretchPlayed,
     breakStretchQueued,
+    breakPhase,
     homeIdleTick,
   ]);
 
