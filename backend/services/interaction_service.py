@@ -53,12 +53,6 @@ async def _run_sync(func, *args):
     return await loop.run_in_executor(None, functools.partial(func, *args))
 
 
-def _build_title(text: str, max_len: int = 32) -> str:
-    if len(text) <= max_len:
-        return text
-    return f"{text[:max_len].rstrip()}..."
-
-
 async def process_user_intent(user_text: str, user_emotion: Optional[str] = None) -> Dict:
     """
     Process user ASR text with three-layer routing:
@@ -107,8 +101,11 @@ async def process_user_intent(user_text: str, user_emotion: Optional[str] = None
     if intent == "breakdown":
         steps = await _run_sync(dashscope_service.decompose_task, text)
         summary = await _run_sync(dashscope_service.summarize_breakdown, text, steps)
+        title = await _run_sync(dashscope_service.summarize_title, text, steps)
+        if not title:
+            title = text or "任务拆解"
         breakdown = TaskBreakdown(
-            title=_build_title(text),
+            title=title,
             steps=steps,
         )
         payload = BreakdownPayload(

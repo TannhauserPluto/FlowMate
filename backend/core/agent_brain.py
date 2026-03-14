@@ -1,6 +1,6 @@
-'''
+﻿"""
 FlowMate-Echo Agent Brain
-'''
+"""
 
 import json
 import os
@@ -11,7 +11,7 @@ from .prompt_templates import PromptTemplates
 
 
 class AgentBrain:
-    '''AI decision brain'''
+    """AI decision brain"""
 
     def __init__(self):
         self.api_key = settings.DASHSCOPE_API_KEY
@@ -103,16 +103,16 @@ class AgentBrain:
         messages = [
             {
                 "role": "system",
-                "content": "??????????????????8????????????????",
+                "content": "请为任务生成一个中文标题，要求：不超过9个字符，简洁准确，不要标点，不要解释，只输出标题。",
             },
             {
                 "role": "user",
-                "content": f"???{task_description}\n???{steps}\n???",
+                "content": f"任务：{task_description}\n步骤：{steps}\n请输出标题：",
             },
         ]
         response = await self._call_qwen(messages, max_tokens=30)
         if response:
-            return response.strip().splitlines()[0][:8]
+            return response.strip().splitlines()[0]
         return ""
 
     async def generate_encouragement(self, flow_state: str, work_duration: int, fatigue_level: int) -> str:
@@ -120,7 +120,7 @@ class AgentBrain:
         if self.use_preset:
             return self.prompts.get_encouragement_by_state(flow_state, work_minutes)
 
-        context = f"??:{flow_state} ??:{work_minutes}?? ??:{fatigue_level}%"
+        context = f"状态:{flow_state} 时长:{work_minutes}分钟 疲劳:{fatigue_level}%"
         messages = [
             {"role": "system", "content": self.prompts.encouragement_system},
             {"role": "user", "content": context},
@@ -138,7 +138,7 @@ class AgentBrain:
     ) -> str:
         system_prompt = (
             "你是一个专注引导助手，负责在番茄钟场景中用友好、简短的话语引导用户。"
-            "回答控制在 30 字以内，语气自然，不要过度热情。"
+            "回答控制在30字以内，语气自然，不要过度热情。"
         )
         user_content = (
             f"目的: {purpose}\n"
@@ -170,21 +170,21 @@ class AgentBrain:
         if self.use_preset:
             message_lower = message.lower()
             if "?" in message_lower or "?" in message_lower:
-                return "???????????????"
+                return "你是遇到什么问题了吗？"
             if "?" in message_lower or "?" in message_lower:
-                return "???????????????"
+                return "你是遇到什么问题了吗？"
             if "??" in message_lower or "hi" in message_lower:
-                return "????????????"
+                return "你好呀，需要帮忙吗？"
             if "?" in message_lower:
-                return "????????"
+                return "我在这里，随时可以帮你。"
 
         messages = [{"role": "system", "content": self.prompts.chat_system}]
         if context:
-            messages.append({"role": "system", "content": f"???:{context}"})
+            messages.append({"role": "system", "content": f"上下文:{context}"})
         messages.append({"role": "user", "content": message})
 
         response = await self._call_qwen(messages, max_tokens=100)
-        return response or "???????"
+        return response or "我在，继续说吧。"
 
     async def analyze_screen_content(self, analysis_result: str) -> dict:
         messages = [

@@ -1,4 +1,4 @@
-"""
+﻿"""
 FlowMate-Echo DashScope Service
 阿里云 DashScope Qwen-Max 服务模块
 """
@@ -52,12 +52,10 @@ class DashScopeService:
         if not text:
             return None
 
-        # 清理可能的 markdown 标记
         text = text.strip()
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```$', '', text)
 
-        # 尝试直接解析
         try:
             result = json.loads(text)
             if isinstance(result, list):
@@ -65,7 +63,6 @@ class DashScopeService:
         except json.JSONDecodeError:
             pass
 
-        # 尝试提取 JSON 数组部分
         try:
             match = re.search(r'\[[\s\S]*?\]', text)
             if match:
@@ -75,7 +72,6 @@ class DashScopeService:
         except json.JSONDecodeError:
             pass
 
-        # 尝试按行解析为列表
         lines = []
         for line in text.strip().split('\n'):
             line = line.strip()
@@ -93,25 +89,25 @@ class DashScopeService:
         Decomposition Agent - 任务拆解
         将大任务拆解为 3 个可执行的微步骤
         """
-        system_prompt = """你是一个任务拆解专家。你的唯一工作是将用户的大任务拆解为3个具体可执行的微步骤。
+        system_prompt = """你是一个任务拆解专家。你的唯一工作是把用户的大任务拆解成 3 个具体可执行的微步骤。
 
 【强制输出格式】
-你必须且只能输出一个JSON数组，格式如下：
+只输出一个 JSON 数组，格式如下：
 ["步骤1的具体动作", "步骤2的具体动作", "步骤3的具体动作"]
 
 【规则】
-1. 固定输出3个步骤，不多不少
-2. 每个步骤必须是具体的物理动作，例如"打开Word"、"新建文件"、"输入标题"
-3. 禁止使用抽象词汇如"思考"、"分析"、"理解"、"规划"
-4. 每个步骤控制在15字以内
-5. 不要输出任何解释、markdown标记或其他内容，只输出JSON数组
+1. 固定输出 3 个步骤，不多不少
+2. 每个步骤必须是具体物理动作，如“打开Word”“新建文件”“输入标题”
+3. 禁止使用抽象词汇，如“思考”“分析”“理解”“规划”
+4. 每个步骤控制在 5 字以内
+5. 不要输出任何解释、markdown 或其他内容
 
 【示例】
 输入：写一份调研报告
-输出：["新建Word文档", "写下报告标题", "列出三个章节标题"]
+输出：["新建Word文档", "写下报告标题", "列出三个章节"]
 
 输入：学习Python编程
-输出：["打开VS Code", "新建test.py文件", "输入print语句并运行"]"""
+输出：["打开VS Code", "新建test.py", "输入print"]"""
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -125,22 +121,21 @@ class DashScopeService:
             if parsed and len(parsed) >= 3:
                 return parsed[:3]
 
-        # 回退：预设响应
         return self._get_fallback_tasks(task)
 
     def _get_fallback_tasks(self, task: str) -> List[str]:
         """回退方案：预设任务响应"""
         task_lower = task.lower()
         presets = {
-            "报告": ["新建Word文档", "写下报告标题", "列出三个章节标题"],
-            "论文": ["打开Word", "输入论文标题", "写出摘要第一句"],
+            "报告": ["新建Word文档", "写下报告标题", "列出三个章节"],
+            "论文": ["打开Word", "输入论文标题", "写第一句摘要"],
             "代码": ["打开编辑器", "新建代码文件", "写第一个函数"],
-            "python": ["打开VS Code", "新建test.py", "输入print语句"],
-            "学习": ["打开学习资料", "阅读第一页", "写下一个关键词"],
-            "复习": ["打开笔记本", "翻到第一页", "大声读出标题"],
-            "ppt": ["打开PowerPoint", "新建空白幻灯片", "输入封面标题"],
-            "邮件": ["打开邮箱", "点击新建邮件", "输入收件人地址"],
-            "文章": ["打开文档", "写下文章标题", "输入第一段第一句"],
+            "python": ["打开VS Code", "新建test.py", "输入print"],
+            "学习": ["打开学习资料", "阅读第一页", "写下关键词"],
+            "复习": ["打开笔记本", "翻到第一页", "写一个关键词"],
+            "ppt": ["打开PowerPoint", "新建空白页", "输入封面标题"],
+            "邮件": ["打开邮箱", "点击新建邮件", "填写收件人"],
+            "文章": ["打开文档", "写下文章标题", "输入第一句"],
         }
 
         for key, steps in presets.items():
@@ -158,9 +153,8 @@ class DashScopeService:
         system_prompt = (
             "你是一个意图路由器，只能输出 JSON："
             "{\"intent\":\"chat\"} 或 {\"intent\":\"breakdown\"}。"
-            "当用户表达卡住、不会、不知道怎么开始、启动困难、"
-            "想要拆解任务时输出 breakdown；普通闲聊输出 chat。"
-            "不要输出任何其它内容。"
+            "当用户表达卡住、不会、不知道怎么开始、启动困难、想拆解任务时输出 breakdown；"
+            "普通闲聊输出 chat。不要输出任何其他内容。"
         )
 
         messages = [
@@ -209,7 +203,7 @@ class DashScopeService:
             "论文",
             "作业",
             "项目",
-            "雅思",
+            "汇报",
         ]
         if any(keyword in text_lower for keyword in extra_breakdown_keywords):
             return "breakdown"
@@ -238,6 +232,22 @@ class DashScopeService:
 
         return f"这确实有点难，我们先从“{steps[0]}”开始吧。"
 
+    def summarize_title(self, task: str, steps: List[str]) -> str:
+        """Summarize task into a short title (<=9 chars)."""
+        system_prompt = (
+            "请为任务生成一个中文标题，要求：不超过9个字符，简洁准确，"
+            "不要标点，不要解释，只输出标题。"
+        )
+        user_prompt = f"任务：{task}\n步骤：{steps}\n请输出标题："
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        response = self._call_qwen(messages, max_tokens=30, temperature=0.3)
+        if response:
+            return response.strip().splitlines()[0]
+        return ""
+
     def summarize_memo(self, text: str) -> str:
         """Summarize a flash memo into a short todo/reminder phrase."""
         cleaned = (text or "").strip()
@@ -246,8 +256,8 @@ class DashScopeService:
 
         system_prompt = (
             "你是一个任务提醒助手。"
-            "请把用户的闪念总结成一条简短、可执行的待办/提醒。"
-            "要求：输出一句话，不超过15字，不要前后引号，不要列表，不要解释。"
+            "请把用户的闪念总结成一条简短、可执行的待办提醒。"
+            "要求：输出一句话，不超过15字，不要引号，不要列表，不要解释。"
         )
         user_prompt = f"用户闪念：{cleaned}\n请输出总结后的待办。"
 
@@ -258,7 +268,7 @@ class DashScopeService:
 
         response = self._call_qwen(messages, max_tokens=40, temperature=0.4)
         if response:
-            return response.strip().strip('"“”')
+            return response.strip().strip('"')
 
         return ""
 
@@ -268,79 +278,15 @@ class DashScopeService:
         history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, str]:
         """
-        Chat Agent - 伴侣闲聊
+        Chat Agent - 伙伴闲聊
         基于 FlowMate Persona 生成回复
         """
-        system_prompt = """你是 FlowMate，一个旨在帮助用户进入心流状态的温暖伙伴。
+        system_prompt = """你是 FlowMate，一个陪伴用户进入心流状态的温暖伙伴。
 
-【你的性格】
+【性格】
 - 语调轻柔、鼓励、有趣
 - 关心用户的工作状态和身心健康
 - 像一个安静的图书馆伙伴
-
-【行为规则】
-1. 回复简短精炼，不超过50字
-2. 不使用emoji表情
-3. 语气自然，像朋友聊天
-
-【特殊场景处理】
-- 当用户表达疲劳、困倦时：分享一个有趣的冷知识来帮助"认知转换"缓解大脑疲劳
-- 当用户求助或遇到困难时：给予鼓励和简单建议
-- 当用户说"完成了"、"做完了"、"搞定了"时：夸奖用户，可以说"刚才你简直是打字机成精了！"
-- 当用户打招呼时：友好回应，询问今天的工作计划
-
-【冷知识示例】（用于缓解疲劳时分享）
-- 章鱼有三颗心脏，两颗专门给鳃供血
-- 蜂蜜是永远不会变质的食物
-- 人类的大脑在睡眠时比看电视时更活跃"""
-
-        # 构建消息列表
-        messages = [{"role": "system", "content": system_prompt}]
-
-        # 添加历史对话
-        if history:
-            for h in history[-6:]:  # 最多保留最近6轮
-                if "user" in h:
-                    messages.append({"role": "user", "content": h["user"]})
-                if "assistant" in h:
-                    messages.append({"role": "assistant", "content": h["assistant"]})
-
-        # 添加当前消息
-        messages.append({"role": "user", "content": message})
-
-        response = self._call_qwen(messages, max_tokens=150, temperature=0.8)
-
-        # 情绪检测
-        emotion = self._detect_emotion(message)
-
-        if response:
-            return {"reply": response.strip(), "emotion": emotion}
-
-        # 回退响应
-        return {"reply": self._get_fallback_chat(message), "emotion": emotion}
-
-    def stream_chat(
-        self,
-        message: str,
-        history: Optional[List[Dict[str, str]]] = None,
-    ) -> Iterator[str]:
-        """Stream chat reply as text chunks (best-effort)."""
-        if not self.api_key:
-            raise RuntimeError("DASHSCOPE_KEY is required for DashScope. Set env DASHSCOPE_KEY.")
-
-        system_prompt = """你是 FlowMate，一个旨在帮助用户进入心流状态的温暖伙伴。
-【你的性格】
-- 语气轻柔、鼓励、有趣
-- 关心用户的工作状态和身心健康
-- 像一个安静的图书馆伙伴
-【行为规则】
-1. 回复简短精炼，不超过 30 字
-2. 不使用 emoji 表情
-3. 语气自然，像朋友聊天
-【特殊场景处理】
-- 疲劳时分享冷知识
-- 求助时给出鼓励和简单建议
-- 完成任务时夸奖
 """
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -419,7 +365,7 @@ class DashScopeService:
         """
         system_prompt = (
             "你是 FlowMate，一个温和且坚定的效率伙伴。"
-            "请用中文回复，1-2 句话，简洁、友好、支持用户。"
+            "请用中文回复 1-2 句话，简洁、友好、支持用户。"
         )
 
         user_prompt = (
@@ -447,7 +393,7 @@ class DashScopeService:
             return "happy"
         if any(word in message_lower for word in ["累", "困", "疲", "烦"]):
             return "tired"
-        if any(word in message_lower for word in ["难", "卡", "不会", "帮"]):
+        if any(word in message_lower for word in ["难", "卡住", "不会", "帮"]):
             return "need_help"
         if any(word in message_lower for word in ["你好", "hi", "嗨", "早"]):
             return "greeting"
@@ -455,21 +401,21 @@ class DashScopeService:
         return "neutral"
 
     def _get_fallback_chat(self, message: str) -> str:
-        """回退方案：预设聊天响应"""
+        """回退方案：预设聊天回复"""
         message_lower = message.lower()
 
         if any(word in message_lower for word in ["完成", "做完", "搞定"]):
-            return "刚才你简直是打字机成精了！给自己一个小奖励吧"
+            return "刚才你简直是打字机成精了，给自己一个小奖励吧。"
         if any(word in message_lower for word in ["累", "困", "疲"]):
-            return "知道吗，章鱼有三颗心脏。休息一下，让大脑换换频道"
+            return "知道吗，章鱼有三颗心脏。休息一下，让大脑换个频率。"
         if any(word in message_lower for word in ["难", "卡住"]):
-            return "卡住了没关系，先深呼吸一下，换个角度试试"
+            return "卡住没关系，先深呼吸一下，换个角度试试。"
         if any(word in message_lower for word in ["你好", "hi", "嗨"]):
-            return "你好呀，今天打算做什么？我陪你一起"
-        if any(word in message_lower for word in ["谢"]):
-            return "不客气，继续加油，我在这里陪着你"
+            return "你好呀，今天打算做什么？我陪你一起。"
+        if any(word in message_lower for word in ["谢", "谢谢"]):
+            return "不客气，继续加油，我在这里陪着你。"
 
-        return "我在这里陪着你，有什么需要帮忙的吗"
+        return "我在这里陪着你，有什么需要帮忙的吗？"
 
 
 # 全局实例

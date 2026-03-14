@@ -31,6 +31,7 @@ const getBeijingDate = () =>
     day: 'numeric',
   }).format(new Date());
 
+
 const MINI_DESIGN_WIDTH = 266;
 const MINI_DESIGN_HEIGHT = 241;
 const MINI_ASPECT_RATIO = MINI_DESIGN_WIDTH / MINI_DESIGN_HEIGHT;

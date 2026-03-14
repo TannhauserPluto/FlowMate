@@ -62,7 +62,8 @@ const DEFAULT_CHAT_USER_TEXT = '我需要写一篇关于数字媒体交互的论
 const DEFAULT_CHAT_ASSISTANT_TEXT =
   '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list';
 const HOME_WELCOME_TEXT =
-  '你好呀，我是 FlowMate，你的心流维护小助手。你可以在输入框告诉我今天要完成的事，我会帮你拆解成待办；也可以点击麦克风直接说话。想进入专注计时就点下方的“番茄钟”，头像页可以查看进度。现在告诉我你的任务吧。';
+  '你好呀，我是 FlowMate，你的心流维护小助手。你可以在输入框告诉我今天要完成的事，我会帮你拆解成待办；也可以点击麦克风直接告诉我你的闪念灵感。想进入专注计时就点下方的“番茄钟”，头像页可以查看进度。现在告诉我你的任务吧';
+const HOME_WELCOME_AUDIO_SRC = '/audio/home_welcome.mp3';
 const DEFAULT_TASK_TITLE = '数字媒体论文';
 const DEFAULT_TODO_TEXTS = [
   '明确论文基本信息',
@@ -214,7 +215,7 @@ const summarizeTopic = (userText: string, tasks: string[]) => {
   if (has('项目')) return '项目任务';
   const fallback = sanitizeText(userText || tasks[0] || '任务');
   if (!fallback) return '任务';
-  return fallback.length > 8 ? `${fallback.slice(0, 8)}...` : fallback;
+  return fallback;
 };
 
 const toTotalSeconds = (value: TimeWheelValue) =>
@@ -727,6 +728,59 @@ const App: React.FC = () => {
   const setSpeechBubble = (text?: string) => {
     if (!text) return;
     setSpeechBubbleText(wrapTextByWidth(sanitizeText(text)));
+  };
+
+  const playHomeWelcomeAudio = async () => {
+    const fallbackToTts = () => {
+      console.log('[HomeWelcome] using_dynamic_tts_fallback');
+      void speakText(HOME_WELCOME_TEXT, 'home_welcome');
+    };
+    if (!HOME_WELCOME_AUDIO_SRC) {
+      console.log('[HomeWelcome] local_audio_missing_fallback_to_tts');
+      fallbackToTts();
+      return;
+    }
+    const src = /^https?:\/\//.test(HOME_WELCOME_AUDIO_SRC)
+      ? HOME_WELCOME_AUDIO_SRC
+      : HOME_WELCOME_AUDIO_SRC.startsWith('/')
+        ? `${window.location.origin}${HOME_WELCOME_AUDIO_SRC}`
+        : HOME_WELCOME_AUDIO_SRC;
+    let response: Response;
+    try {
+      response = await fetch(src, { cache: 'no-store' });
+    } catch (error) {
+      console.log('[HomeWelcome] local_audio_missing_fallback_to_tts', error);
+      fallbackToTts();
+      return;
+    }
+    if (!response.ok) {
+      console.log('[HomeWelcome] local_audio_missing_fallback_to_tts');
+      fallbackToTts();
+      return;
+    }
+    const audio = ensureAudioPlayer();
+    let blob = await response.blob();
+    if (!blob.type) {
+      const buffer = await blob.arrayBuffer();
+      blob = new Blob([buffer], { type: 'audio/mpeg' });
+    }
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    audioUrlRef.current = objectUrl;
+    console.log('[HomeWelcome] using_local_audio', { src, blob_type: blob.type, size: blob.size });
+    audio.pause();
+    audio.currentTime = 0;
+    audio.src = objectUrl;
+    try {
+      console.log('[HomeWelcome] play_local_audio');
+      await audio.play();
+    } catch (error) {
+      console.warn('[HomeWelcome] local_audio_load_error_fallback_to_tts', error);
+      fallbackToTts();
+    }
   };
 
   const speakText = async (text: string, source = 'other') => {
@@ -2485,7 +2539,7 @@ const App: React.FC = () => {
     if (!hasPlayedHomeWelcomeAudioRef.current) {
       hasPlayedHomeWelcomeAudioRef.current = true;
       console.log('[HomeWelcome] first_entry_play_audio');
-      void speakText(HOME_WELCOME_TEXT, 'home_welcome');
+      void playHomeWelcomeAudio();
     } else {
       console.log('[HomeWelcome] reentry_skip_audio_show_bubble_only');
     }
