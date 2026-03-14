@@ -23,7 +23,6 @@ import vidFocus from './assets/video_loops/focus.webm';
 import vidStretch from './assets/video_loops/Stretch.webm';
 import {
   parseTodoState,
-  readTodoState,
   serializeTodoState,
   MEMO_STORAGE_KEY,
   TODO_STORAGE_KEY,
@@ -240,7 +239,7 @@ const toTimeWheelValue = (totalSeconds: number): TimeWheelValue => {
 
 
 const App: React.FC = () => {
-  const initialTodoState = useMemo(() => readTodoState(), []);
+  const initialTodoState = useMemo<StoredTodoState | null>(() => null, []);
   const [currentView, setCurrentView] = useState<View>('home');
   const [profileTab, setProfileTab] = useState<ProfileTab>('day');
   const [encouragement, setEncouragement] = useState('让我来拆解你的任务吧～');
@@ -249,7 +248,7 @@ const App: React.FC = () => {
   const [homeChatBubble, setHomeChatBubble] = useState('');
   const [speechBubbleText, setSpeechBubbleText] = useState('');
   const initialBoardIdRef = useRef(createBoardId());
-  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? DEFAULT_TASK_TITLE);
+  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? '');
   const [taskMessages, setTaskMessages] = useState<TaskMessage[]>([]);
   const [isInitialTaskLocked, setIsInitialTaskLocked] = useState(false);
   const [taskDate, setTaskDate] = useState(initialTodoState?.taskDate ?? getBeijingDate());
@@ -265,6 +264,7 @@ const App: React.FC = () => {
   const isBreakView = primaryView === 'break';
   const isTimerView = primaryView === 'timer' || isFocusView || isBreakView;
   const isHomeView = primaryView === 'home';
+  const hasPlayedHomeWelcomeAudioRef = useRef(false);
   const [isFocusRunning, setIsFocusRunning] = useState(false);
   const [isCountUp, setIsCountUp] = useState(false);
   const [focusSessionId, setFocusSessionId] = useState<string | null>(null);
@@ -345,7 +345,7 @@ const App: React.FC = () => {
   const [breakStretchPlayed, setBreakStretchPlayed] = useState(false);
   const [breakStretchQueued, setBreakStretchQueued] = useState(false);
 
-  const [todoItems, setTodoItems] = useState<TodoItem[]>(() => initialTodoState?.todoItems ?? buildDefaultTodos());
+  const [todoItems, setTodoItems] = useState<TodoItem[]>(() => initialTodoState?.todoItems ?? []);
   const [doneItems, setDoneItems] = useState<TodoItem[]>(() => initialTodoState?.doneItems ?? []);
   const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
   const [archivedTransitions, setArchivedTransitions] = useState<Record<string, 'toDone' | 'toTodo'>>({});
@@ -955,12 +955,15 @@ const App: React.FC = () => {
       const response = await fetch(`${API_BASE}/focus/prompt`, { method: 'POST' });
       if (!response.ok) return;
       const data = await response.json();
+      console.log('[FocusUI] prompt payload', data);
       if (data?.prompt) {
         setFocusPrompt(data.prompt);
         setSpeechBubble(data.prompt);
+        console.log('[FocusUI] bubble_text', data.prompt);
       }
       if (data?.audio?.base64) {
-        playAudioFromBase64(data.audio.base64, data.audio.format);
+        console.log('[FocusUI] audio_source', 'focus_prompt');
+        playAudioFromBase64(data.audio.base64, data.audio.format, 'focus_prompt', data.prompt);
       }
     } catch {
       // ignore prompt errors
@@ -2479,7 +2482,13 @@ const App: React.FC = () => {
       return;
     }
     setHomeChatBubble(wrapTextByWidth(HOME_WELCOME_TEXT));
-    void speakText(HOME_WELCOME_TEXT, 'home_welcome');
+    if (!hasPlayedHomeWelcomeAudioRef.current) {
+      hasPlayedHomeWelcomeAudioRef.current = true;
+      console.log('[HomeWelcome] first_entry_play_audio');
+      void speakText(HOME_WELCOME_TEXT, 'home_welcome');
+    } else {
+      console.log('[HomeWelcome] reentry_skip_audio_show_bubble_only');
+    }
   }, [isHomeView, homeChatBubble]);
 
   useEffect(() => {

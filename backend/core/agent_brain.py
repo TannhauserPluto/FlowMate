@@ -137,10 +137,15 @@ class AgentBrain:
         history: Optional[List[dict]] = None,
     ) -> str:
         system_prompt = (
-            "???????????????????????????"
-            "???????30????????????"
+            "你是一个专注引导助手，负责在番茄钟场景中用友好、简短的话语引导用户。"
+            "回答控制在 30 字以内，语气自然，不要过度热情。"
         )
-        user_content = f"??: {purpose}\n??: {task_text}\n????: {user_reply}\n?????????"
+        user_content = (
+            f"目的: {purpose}\n"
+            f"任务: {task_text}\n"
+            f"用户回复: {user_reply}\n"
+            "请生成一句引导或回应。"
+        )
         messages = [{"role": "system", "content": system_prompt}]
         if history:
             messages.extend(history[-6:])
@@ -151,15 +156,15 @@ class AgentBrain:
             return response.strip().splitlines()[0]
 
         fallback = {
-            "ask_task": "???????????",
-            "encourage": "?????????",
-            "distracted": "??????????????????",
-            "ask_rest": "?????????????????",
-            "continue": "???????????",
-            "shorten": "??????????????",
-            "end_focus": "??????????",
+            "ask_task": "这次专注准备完成什么任务呢？",
+            "encourage": "好的，我们开始吧。",
+            "distracted": "看起来有点分心，要回到刚才的任务吗？",
+            "ask_rest": "要不要休息一下？",
+            "continue": "我们继续吧。",
+            "shorten": "需要缩短时间吗？",
+            "end_focus": "专注结束啦，辛苦了。",
         }
-        return fallback.get(purpose, "???????")
+        return fallback.get(purpose, "我在这儿，需要我帮忙吗？")
 
     async def chat(self, message: str, context: Optional[str] = None) -> str:
         if self.use_preset:

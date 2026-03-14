@@ -75,15 +75,25 @@ async def focus_prompt():
     """Ask user what they want to focus on (friend tone)."""
     print("[Focus] prompt requested")
     prompt = await agent_brain.generate_focus_message("ask_task")
+    snippet = (prompt or "").replace("\n", " ").strip()
+    if len(snippet) > 80:
+        snippet = f"{snippet[:80]}..."
+    print(f"[Focus] prompt text={snippet}")
+    print(f"[Focus] tts requested text={snippet}")
     audio = await audio_service.speak(prompt, "neutral")
+    audio_len = len(audio.get("audio_data", "") or "")
+    print(f"[Focus] tts result status={audio.get('status')} audio_len={audio_len}")
     print("[Focus] prompt generated")
-    return FocusPromptResponse(
+    response = FocusPromptResponse(
         prompt=prompt,
         audio={
             "base64": audio.get("audio_data", ""),
             "format": audio.get("format", "mp3"),
         },
     )
+    payload = response.dict() if hasattr(response, "dict") else response.model_dump()
+    print(f"[Focus] response payload keys={list(payload.keys())}")
+    return response
 
 
 @router.post("/start", response_model=FocusStartResponse)

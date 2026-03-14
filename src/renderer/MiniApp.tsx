@@ -5,7 +5,6 @@ import {
   parseMemos,
   parseTodoState,
   readMemos,
-  readTodoState,
   serializeTodoState,
   writeTodoState,
   type MemoItem,
@@ -23,15 +22,6 @@ type ResizeState = {
   startBounds: Bounds;
   axis?: 'width' | 'height';
 };
-
-const DEFAULT_TODO_TEXTS = [
-  '明确论文基本信息',
-  '头脑风暴 3–5 个可写选题',
-  '搜索并筛选文献',
-];
-
-const buildDefaultTodos = () =>
-  DEFAULT_TODO_TEXTS.map((text, index) => ({ id: `todo-default-${index}`, text }));
 
 const getBeijingDate = () =>
   new Intl.DateTimeFormat('en-US', {
@@ -267,7 +257,7 @@ const MiniMemoCard = ({
 );
 
 const MiniApp: React.FC = () => {
-  const initialTodoState = useMemo(() => readTodoState(), []);
+  const initialTodoState = useMemo<StoredTodoState | null>(() => null, []);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
     startX: number;
@@ -277,10 +267,10 @@ const MiniApp: React.FC = () => {
   } | null>(null);
   const dragRafRef = useRef<number | null>(null);
   const dragSuppressClickRef = useRef(false);
-  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? '任务');
+  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? '');
   const [taskDate, setTaskDate] = useState(initialTodoState?.taskDate ?? getBeijingDate());
   const [todoItems, setTodoItems] = useState<TodoEntry[]>(
-    () => initialTodoState?.todoItems ?? buildDefaultTodos(),
+    () => initialTodoState?.todoItems ?? [],
   );
   const [doneItems, setDoneItems] = useState<TodoEntry[]>(() => initialTodoState?.doneItems ?? []);
   const [memos, setMemos] = useState<MemoItem[]>(() => readMemos().slice(-3));
