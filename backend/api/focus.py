@@ -6,6 +6,7 @@ Focus session + flow detection orchestration.
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
+import random
 
 from core import agent_brain, focus_session_manager
 from services import screen_agent, fatigue_detector, audio_service
@@ -46,6 +47,10 @@ class ScreenCheckResponse(BaseModel):
     audio: Optional[dict] = None
 
 
+class ScreenCheckOverrideRequest(BaseModel):
+    mode: str  # related | unrelated | none
+
+
 class FatigueCheckRequest(BaseModel):
     session_id: str
     remaining_seconds: int
@@ -68,6 +73,55 @@ class FatigueResponseRequest(BaseModel):
 
 class FocusFinishRequest(BaseModel):
     session_id: str
+
+
+_SCREEN_CHECK_OVERRIDE: Optional[str] = None
+
+
+def _set_screen_check_override(mode: Optional[str]) -> None:
+    global _SCREEN_CHECK_OVERRIDE
+    _SCREEN_CHECK_OVERRIDE = mode
+    if mode:
+        print(f"[screen-check] override_set mode={mode}")
+
+
+def _consume_screen_check_override() -> Optional[str]:
+    global _SCREEN_CHECK_OVERRIDE
+    mode = _SCREEN_CHECK_OVERRIDE
+    if mode:
+        print(f"[screen-check] override_consumed mode={mode}")
+    _SCREEN_CHECK_OVERRIDE = None
+    return mode
+
+
+def _build_demo_override_result(mode: str, task_text: str) -> dict:
+    safe_task = task_text.strip() if task_text else "当前专注任务"
+    if mode == "related":
+        analysis = random.choice([
+            f"检测到与“{safe_task}”相关的编辑器/文档界面",
+            f"屏幕内容与“{safe_task}”高度相关，正在处理专注任务",
+            f"当前界面显示与“{safe_task}”相关的信息与工作流",
+        ])
+        suggestion = "继续保持专注"
+        score = random.randint(75, 92)
+        is_focused = True
+    else:
+        analysis = random.choice([
+            "检测到社交媒体/聊天窗口，与当前任务无关",
+            "检测到购物/视频娱乐页面，注意力偏离任务",
+            "检测到与任务无关的新闻/娱乐内容",
+        ])
+        suggestion = "建议关闭分心页面，回到当前任务"
+        score = random.randint(18, 45)
+        is_focused = False
+    return {
+        "is_focused": is_focused,
+        "score": score,
+        "analysis": analysis,
+        "suggestion": suggestion,
+        "source": "demo_override",
+        "mode": mode,
+    }
 
 
 @router.post("/prompt", response_model=FocusPromptResponse)
@@ -136,7 +190,15 @@ async def screen_check(request: ScreenCheckRequest):
         raise HTTPException(status_code=400, detail="task_text cannot be empty")
 
     print(f"[Focus] screen-check session={request.session_id} task='{task_text}'")
-    result = await screen_agent.audit_screen(request.image, task_text, cooldown_seconds=0)
+    override_mode = _consume_screen_check_override()
+    if override_mode:
+        result = _build_demo_override_result(override_mode, task_text)
+        print(
+            "[screen-check] result source=demo_override "
+            f"related={result.get('is_focused')} score={result.get('score')}"
+        )
+    else:
+        result = await screen_agent.audit_screen(request.image, task_text, cooldown_seconds=0)
     is_focused = bool(result.get("is_focused", True))
     next_interval = focus_session_manager.set_screen_result(session.id, is_focused) or 8 * 60
     print(
@@ -168,6 +230,18 @@ async def screen_check(request: ScreenCheckRequest):
         reply=reply,
         audio=audio_payload,
     )
+
+
+@router.post("/screen-check-override")
+async def screen_check_override(request: ScreenCheckOverrideRequest):
+    mode = (request.mode or "").strip().lower()
+    if mode in ("", "none"):
+        _set_screen_check_override(None)
+        return {"status": "ok", "pending_override": None}
+    if mode not in ("related", "unrelated"):
+        raise HTTPException(status_code=400, detail="mode must be related|unrelated|none")
+    _set_screen_check_override(mode)
+    return {"status": "ok", "pending_override": mode}
 
 
 @router.post("/fatigue-check", response_model=FatigueCheckResponse)

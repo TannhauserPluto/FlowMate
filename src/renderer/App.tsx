@@ -85,6 +85,8 @@ const TIMER_WHEEL_SIZE = {
   separatorHeight: 56,
 };
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
+const DEMO_SCREEN_CHECK_SHORTCUTS =
+  String(import.meta.env.VITE_DEMO_SCREEN_CHECK_SHORTCUTS ?? '').toLowerCase() === 'true';
 if (import.meta.env.DEV) {
   console.log('[api] base', API_BASE);
 }
@@ -368,12 +370,17 @@ const App: React.FC = () => {
   const [breakStretchPlayed, setBreakStretchPlayed] = useState(false);
   const [breakStretchQueued, setBreakStretchQueued] = useState(false);
   const BREAK_FACTS = [
-    '蜂鸟是唯一能向后飞的鸟。',
-    '章鱼有三颗心脏。',
-    '人类眨眼的速度比眨眼的频率更快。',
-    '海獭睡觉时会牵着手防止漂走。',
-    '香蕉其实属于浆果。',
-    '猫能发出超过100种不同的声音。',
+  '休息一下，给你讲个有趣的冷知识：蜂鸟是唯一能向后飞的鸟。它还能悬停在空中，看起来就像一架迷你直升机，所以它采花蜜的时候总显得特别灵活。',
+
+  '趁现在放松一下，分享你一个冷知识：章鱼其实有三颗心脏。两颗负责鳃部循环，一颗负责全身循环，所以它的身体结构比很多人想象中还要神奇。',
+
+  '给你来个轻松的小知识：人眨眼的动作其实特别快，快到大脑经常会自动忽略掉。也就是说，你以为自己一直在盯着前方，其实中间已经悄悄眨了很多次眼。',
+
+  '说个可爱的冷知识给你听：海獭睡觉时会牵着手，防止彼此漂散。想象一下它们在海面上抱团漂着睡觉，真的像天然自带治愈属性的小动物。',
+
+  '来一个有意思的冷知识：香蕉在植物学上其实属于浆果。听起来有点反直觉，但这也说明，水果的日常叫法和科学分类有时候还真不是一回事。',
+
+  '再分享你一个小知识：猫咪能发出超过一百种不同的声音。它们会用不同的叫声表达情绪，所以有些时候你会觉得，它们像是在认真和你聊天。'
   ];
 
   const [todoItems, setTodoItems] = useState<TodoItem[]>(() => initialTodoState?.todoItems ?? []);
@@ -605,20 +612,25 @@ const App: React.FC = () => {
     setCurrentView('timer');
   };
 
-  const resetSessionState = () => {
+  const resetSessionState = (options?: { preserveTaskRecords?: boolean }) => {
+    const preserveTaskRecords = options?.preserveTaskRecords ?? false;
     const newBoardId = createBoardId();
-    initialBoardIdRef.current = newBoardId;
+    if (!preserveTaskRecords) {
+      initialBoardIdRef.current = newBoardId;
+    }
     setChatUserText(DEFAULT_CHAT_USER_TEXT);
     setChatAssistantText(DEFAULT_CHAT_ASSISTANT_TEXT);
-    setTaskTitle(DEFAULT_TASK_TITLE);
-    setTaskMessages([]);
-    setIsInitialTaskLocked(false);
-    setTaskDate(getBeijingDate());
-    setTaskBoards([]);
-    setActiveBoardId(newBoardId);
-    setTaskTimeline([{ type: 'board', id: newBoardId }]);
-    setTodoItems(buildDefaultTodos());
-    setDoneItems([]);
+    if (!preserveTaskRecords) {
+      setTaskTitle(DEFAULT_TASK_TITLE);
+      setTaskMessages([]);
+      setIsInitialTaskLocked(false);
+      setTaskDate(getBeijingDate());
+      setTaskBoards([]);
+      setActiveBoardId(newBoardId);
+      setTaskTimeline([{ type: 'board', id: newBoardId }]);
+      setTodoItems(buildDefaultTodos());
+      setDoneItems([]);
+    }
     setTransitioning({});
     setArchivedTransitions({});
     setFocusSessionId(null);
@@ -657,7 +669,7 @@ const App: React.FC = () => {
       window.clearInterval(breakTimerRef.current);
       breakTimerRef.current = null;
     }
-    resetSessionState();
+    resetSessionState({ preserveTaskRecords: true });
     setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
     setCurrentView('home');
   };
@@ -971,6 +983,29 @@ const App: React.FC = () => {
     return canvas.toDataURL('image/jpeg', 0.8);
   };
 
+  const setScreenCheckOverride = async (mode: 'related' | 'unrelated') => {
+    try {
+      await fetch(`${API_BASE}/focus/screen-check-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+    } catch (error) {
+      console.warn('[screen-check-demo] override_set_failed', error);
+    }
+  };
+
+  const triggerDemoScreenCheck = (mode: 'related' | 'unrelated') => {
+    if (!DEMO_SCREEN_CHECK_SHORTCUTS) return;
+    const label = mode === 'related' ? 'ctrl+q' : 'ctrl+e';
+    console.log(`[screen-check-demo] shortcut ${label} triggered`);
+    void (async () => {
+      await setScreenCheckOverride(mode);
+      console.log('[screen-check-demo] detection_requested', { mode });
+      scheduleScreenCheck(0);
+    })();
+  };
+
   const scheduleScreenCheck = (delayMs: number) => {
     if (screenCheckTimeoutRef.current) {
       window.clearTimeout(screenCheckTimeoutRef.current);
@@ -1000,6 +1035,12 @@ const App: React.FC = () => {
         });
         if (!response.ok) return;
         const data = await response.json();
+        if (DEMO_SCREEN_CHECK_SHORTCUTS) {
+          console.log('[screen-check-demo] detection_finished', {
+            related: data?.is_focused,
+            score: data?.score,
+          });
+        }
         if (data?.reply) {
           setSpeechBubble(data.reply);
         }
@@ -3025,6 +3066,14 @@ const App: React.FC = () => {
       if (!event.ctrlKey) return;
       const key = event.key.toLowerCase();
       const code = event.code;
+      const isCtrlQ = key === 'q' || code === 'KeyQ';
+      const isCtrlE = key === 'e' || code === 'KeyE';
+      if (DEMO_SCREEN_CHECK_SHORTCUTS && (isCtrlQ || isCtrlE)) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerDemoScreenCheck(isCtrlQ ? 'related' : 'unrelated');
+        return;
+      }
       const isDigit1 = key === '1' || code === 'Digit1' || code === 'Numpad1';
       const isDigit2 = key === '2' || code === 'Digit2' || code === 'Numpad2';
       const isDigit3 = key === '3' || code === 'Digit3' || code === 'Numpad3';
@@ -3271,13 +3320,6 @@ const App: React.FC = () => {
   const isAvatarSpeechActive = avatarSpeechState !== 'idle';
 
   useEffect(() => {
-    if (isBreakView && isAvatarSpeechActive) {
-      setBreakStretchPlayed(false);
-      setBreakStretchQueued(false);
-    }
-  }, [isBreakView, isAvatarSpeechActive]);
-
-  useEffect(() => {
     if (primaryView !== 'home' || currentView === 'profile' || isAvatarSpeechActive) return;
     const intervalId = window.setInterval(() => {
       setHomeIdleTick((prev) => prev + 1);
@@ -3428,17 +3470,26 @@ const App: React.FC = () => {
         enterBreakView();
         return;
       }
+      let continuePositiveTimer = false;
       try {
-        await fetch(`${API_BASE}/focus/finish`, {
+        const response = await fetch(`${API_BASE}/focus/finish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: focusSessionId }),
         });
+        if (response.ok) {
+          const data = await response.json();
+          continuePositiveTimer = Boolean(data?.start_positive_timer);
+        }
       } catch {
         // ignore finish errors
-      } finally {
-        enterBreakView();
       }
+      if (continuePositiveTimer) {
+        setIsCountUp(true);
+        console.log('[Focus] positive_timer_continue', { sessionId: focusSessionId });
+        return;
+      }
+      enterBreakView();
     };
     finishFocus();
   }, [remainingSeconds, isFocusRunning, isCountUp, focusSessionId]);
