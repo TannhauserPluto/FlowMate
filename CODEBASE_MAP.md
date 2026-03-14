@@ -1,4 +1,4 @@
-# CODEBASE MAP
+  # CODEBASE MAP
 
 ## 1. Project Overview
 - FlowMate-Echo is an Electron + React desktop app backed by a FastAPI service for voice-driven task breakdown, focus mode, and a pre-rendered avatar experience.

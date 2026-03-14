@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union, AsyncIterator
 
 from pydantic import BaseModel
 
@@ -128,3 +128,16 @@ async def process_user_intent(user_text: str, user_emotion: Optional[str] = None
         ui_payload=None,
     )
     return response.model_dump()
+
+
+async def stream_chat_reply(
+    user_text: str,
+    history: Optional[List[Dict[str, str]]] = None,
+) -> AsyncIterator[str]:
+    """Stream chat reply chunks for SSE test path."""
+    text = (user_text or "").strip()
+    if not text:
+        return
+    for chunk in dashscope_service.stream_chat(text, history):
+        if chunk:
+            yield chunk

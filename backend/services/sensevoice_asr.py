@@ -54,14 +54,34 @@ class SenseVoiceService:
                 "error": {"code": "empty_audio", "message": "Audio payload is empty"},
             }
 
+        audio_format = self._infer_format(filename, content_type) or self.DEFAULT_FORMAT
+        print(
+            "[ASR] transcribe_start "
+            f"bytes={len(audio_bytes)} content_type={content_type} format={audio_format}"
+        )
+        if audio_format == "webm":
+            print("[ASR] format_maybe_unsupported format=webm")
+
         if self.MOCK_MODE or not self.api_key or not DASHSCOPE_ASR_AVAILABLE:
+            reasons = []
+            if self.MOCK_MODE:
+                reasons.append("mock_mode")
+            if not self.api_key:
+                reasons.append("missing_api_key")
+            if not DASHSCOPE_ASR_AVAILABLE:
+                reasons.append("dashscope_sdk_unavailable")
+            reason = ",".join(reasons) or "unknown"
+            print(
+                "[ASR] mock_return "
+                f"reason={reason} api_key_set={bool(self.api_key)} sdk_available={DASHSCOPE_ASR_AVAILABLE}"
+            )
             return {
                 "status": "mock",
                 "text": "",
                 "emotion": "neutral",
+                "mock_reason": reason,
             }
 
-        audio_format = self._infer_format(filename, content_type) or self.DEFAULT_FORMAT
         loop = asyncio.get_event_loop()
         try:
             response = await asyncio.wait_for(

@@ -18,8 +18,8 @@ class Settings(BaseModel):
     # ModelScope Token
     MODELSCOPE_TOKEN: str = os.getenv("MODELSCOPE_TOKEN", "")
 
-    # DashScope API Key
-    DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
+    # DashScope API Key (fallback to DASHSCOPE_KEY for legacy .env)
+    DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY") or os.getenv("DASHSCOPE_KEY", "")
 
     # 服务配置
     BACKEND_HOST: str = os.getenv("BACKEND_HOST", "127.0.0.1")

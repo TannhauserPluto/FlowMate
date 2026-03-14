@@ -5,7 +5,7 @@ FlowMate-Echo DashScope Service
 
 import json
 import re
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Iterator
 from dashscope import Generation
 from dashscope.api_entities.dashscope_response import GenerationResponse
 from config import settings
@@ -294,6 +294,99 @@ class DashScopeService:
 
         # 回退响应
         return {"reply": self._get_fallback_chat(message), "emotion": emotion}
+
+    def stream_chat(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Iterator[str]:
+        """Stream chat reply as text chunks (best-effort)."""
+        if not self.api_key:
+            raise RuntimeError("DASHSCOPE_KEY is required for DashScope. Set env DASHSCOPE_KEY.")
+
+        system_prompt = """你是 FlowMate，一个旨在帮助用户进入心流状态的温暖伙伴。
+【你的性格】
+- 语气轻柔、鼓励、有趣
+- 关心用户的工作状态和身心健康
+- 像一个安静的图书馆伙伴
+【行为规则】
+1. 回复简短精炼，不超过 30 字
+2. 不使用 emoji 表情
+3. 语气自然，像朋友聊天
+【特殊场景处理】
+- 疲劳时分享冷知识
+- 求助时给出鼓励和简单建议
+- 完成任务时夸奖
+"""
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            for h in history[-6:]:
+                if "user" in h:
+                    messages.append({"role": "user", "content": h["user"]})
+                if "assistant" in h:
+                    messages.append({"role": "assistant", "content": h["assistant"]})
+        messages.append({"role": "user", "content": message})
+
+        def extract_text(chunk) -> str:
+            if chunk is None:
+                return ""
+            if isinstance(chunk, dict):
+                output = chunk.get("output") or {}
+            else:
+                output = getattr(chunk, "output", None) or {}
+
+            if isinstance(output, dict):
+                choices = output.get("choices") or []
+                if choices:
+                    message_obj = choices[0].get("message") or {}
+                    content = message_obj.get("content")
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                                return item.get("text") or ""
+
+                if isinstance(output.get("text"), str):
+                    return output.get("text") or ""
+
+            return ""
+
+        try:
+            response = Generation.call(
+                model=self.model,
+                api_key=self.api_key,
+                messages=messages,
+                max_tokens=150,
+                temperature=0.8,
+                result_format="message",
+                stream=True,
+            )
+        except Exception as e:
+            print(f"DashScope stream call error: {e}")
+            raise
+
+        full_text = ""
+        has_any = False
+        for chunk in response:
+            text = extract_text(chunk)
+            if not text:
+                continue
+            has_any = True
+            if full_text and text.startswith(full_text):
+                delta = text[len(full_text):]
+                full_text = text
+            else:
+                delta = text
+                full_text += text
+            if delta:
+                yield delta
+
+        if not has_any:
+            fallback = self._get_fallback_chat(message)
+            if fallback:
+                yield fallback
 
     def generate_reply_from_asr(self, user_text: str, user_emotion: str) -> str:
         """

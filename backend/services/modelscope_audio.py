@@ -8,7 +8,8 @@ import base64
 import os
 import uuid
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+import time
 
 from config import settings
 
@@ -91,6 +92,22 @@ class ModelScopeAudio:
         error_message = None
 
         if self.MOCK_MODE or not self.api_key or not DASHSCOPE_AVAILABLE:
+            reasons = []
+            if self.MOCK_MODE:
+                reasons.append("mock_mode")
+            if not self.api_key:
+                reasons.append("missing_api_key")
+            if not DASHSCOPE_AVAILABLE:
+                reasons.append("dashscope_sdk_unavailable")
+            reason = ",".join(reasons) or "unknown"
+            snippet = (synth_text or "").replace("\n", " ").strip()
+            if len(snippet) > 80:
+                snippet = f"{snippet[:80]}..."
+            print(
+                "[TTS] mock_return "
+                f"reason={reason} api_key_set={bool(self.api_key)} sdk_available={DASHSCOPE_AVAILABLE} "
+                f"text={snippet}"
+            )
             audio_b64 = self._load_mock_audio(emotion_key)
             status = "mock"
         else:
@@ -150,6 +167,16 @@ class ModelScopeAudio:
         with open(audio_path, "wb") as f:
             f.write(audio_bytes)
         return str(audio_path)
+
+    async def speak_chunks(self, chunks: List[str], emotion: str) -> List[Dict]:
+        """Generate TTS audio for each chunk in order."""
+        results: List[Dict] = []
+        for chunk in chunks:
+            start = time.perf_counter()
+            result = await self.speak(chunk, emotion)
+            result["_tts_ms"] = int((time.perf_counter() - start) * 1000)
+            results.append(result)
+        return results
 
     async def _call_cosyvoice(
         self,

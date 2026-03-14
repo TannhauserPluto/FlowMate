@@ -84,6 +84,21 @@ const TIMER_WHEEL_SIZE = {
   separatorHeight: 56,
 };
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
+if (import.meta.env.DEV) {
+  console.log('[api] base', API_BASE);
+}
+const buildWsUrl = (path: string) => {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  if (API_BASE.startsWith('http://') || API_BASE.startsWith('https://')) {
+    const url = new URL(API_BASE);
+    const protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    const basePath = url.pathname.replace(/\/$/, '');
+    return `${protocol}//${url.host}${basePath}${normalizedPath}`;
+  }
+  const origin = window.location.origin.replace(/^http/, 'ws');
+  const basePath = API_BASE.replace(/\/$/, '');
+  return `${origin}${basePath}${normalizedPath}`;
+};
 const sanitizeText = (text: string) =>
   text
     .replace(/<\|.*?\|>/g, '')
@@ -286,6 +301,41 @@ const App: React.FC = () => {
   const audioUrlRef = useRef<string | null>(null);
   const audioEventsBoundRef = useRef(false);
   const thinkingCountRef = useRef(0);
+  const chatStreamStateRef = useRef<{
+    id: number;
+    controller: AbortController | null;
+    reader: ReadableStreamDefaultReader<Uint8Array> | null;
+  }>({ id: 0, controller: null, reader: null });
+  const wsTestStateRef = useRef<{
+    id: number;
+    socket: WebSocket | null;
+  }>({ id: 0, socket: null });
+  const wsAudioStateRef = useRef<{
+    id: number;
+    socket: WebSocket | null;
+    recorder: MediaRecorder | null;
+    stream: MediaStream | null;
+    stopTimer: number | null;
+    audio: HTMLAudioElement | null;
+    stopRequested: boolean;
+    useUi: boolean;
+    watchdogTimer: number | null;
+  }>({
+    id: 0,
+    socket: null,
+    recorder: null,
+    stream: null,
+    stopTimer: null,
+    audio: null,
+    stopRequested: false,
+    useUi: false,
+    watchdogTimer: null,
+  });
+  const speakChunksStateRef = useRef<{
+    id: number;
+    controller: AbortController | null;
+    audio: HTMLAudioElement | null;
+  }>({ id: 0, controller: null, audio: null });
   const [isAvatarSpeaking, setIsAvatarSpeaking] = useState(false);
   const avatarVideoRef = useRef<HTMLVideoElement | null>(null);
   const lastViewRef = useRef<View | null>(null);
@@ -553,7 +603,7 @@ const App: React.FC = () => {
     setBreakStretchPlayed(false);
     setBreakRemainingSeconds(BREAK_DEFAULT_SECONDS);
     setCurrentView('break');
-    speakText(nextMessage);
+    speakText(nextMessage, 'break_message');
   };
 
   const finishBreak = () => {
@@ -653,13 +703,25 @@ const App: React.FC = () => {
     return audioPlayerRef.current;
   };
 
+  const isWsAudioActive = () =>
+    wsAudioStateRef.current.useUi &&
+    (wsAudioStateRef.current.socket ||
+      wsAudioStateRef.current.recorder ||
+      wsAudioStateRef.current.stopRequested);
+
   const setSpeechBubble = (text?: string) => {
     if (!text) return;
     setSpeechBubbleText(wrapTextByWidth(sanitizeText(text)));
   };
 
-  const speakText = async (text: string) => {
+  const speakText = async (text: string, source = 'other') => {
     if (!text) return;
+    const snippet = text.replace(/\s+/g, ' ').slice(0, 80);
+    if (isWsAudioActive()) {
+      console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
+      return;
+    }
+    console.log('[speak_api] request', { source, text: snippet });
     setSpeechBubble(text);
     try {
       const response = await fetch(`${API_BASE}/interaction/speak`, {
@@ -669,28 +731,40 @@ const App: React.FC = () => {
       });
       if (!response.ok) return;
       const payload = await response.json();
-      playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+      playAudioFromBase64(
+        payload?.data?.audio?.base64,
+        payload?.data?.audio?.format,
+        `speak_api:${source}`,
+        snippet,
+      );
     } catch {
       // ignore speak errors
     }
   };
 
-  const playAudioFromBase64 = async (base64?: string, format?: string) => {
+  const playAudioFromBase64 = async (
+    base64?: string,
+    format?: string,
+    source = 'other',
+    text?: string,
+  ) => {
     if (!base64) return;
     const mime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
     const audio = ensureAudioPlayer();
     const dataUrl = `data:${mime};base64,${base64}`;
+    console.log('[audio] src_set', { source, text, audio_len: base64.length });
     audio.pause();
     audio.currentTime = 0;
     audio.src = dataUrl;
     try {
+      console.log('[audio] play', { source, text });
       await audio.play();
     } catch (error) {
       console.warn('[audio] HTMLAudio (data URL) play failed', error);
     }
   };
 
-  const playAudioFromUrl = async (url?: string) => {
+  const playAudioFromUrl = async (url?: string, source = 'other') => {
     if (!url) return;
     const audio = ensureAudioPlayer();
     const src = url.startsWith('http')
@@ -698,8 +772,10 @@ const App: React.FC = () => {
       : url.startsWith('/api')
         ? url
         : `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+    console.log('[audio] src_set', { source, url: src });
     audio.src = src;
     try {
+      console.log('[audio] play', { source });
       await audio.play();
     } catch (error) {
       console.warn('[audio] URL play failed', error);
@@ -1007,23 +1083,35 @@ const App: React.FC = () => {
       }
       appendTaskMessage('assistant', reply);
     }
-    if (data?.audio_url) {
-      playAudioFromUrl(data.audio_url);
-    } else if (data?.reply) {
-      try {
-        const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: data.reply, emotion: 'neutral' }),
-        });
-        if (!speakResponse.ok) return;
-        const payload = await speakResponse.json();
-        playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
-      } catch {
-        // ignore fallback speech errors
+      if (data?.audio_url) {
+        playAudioFromUrl(data.audio_url, 'chat_audio_url');
+      } else if (data?.reply) {
+        try {
+          const snippet = String(data.reply ?? '').replace(/\s+/g, ' ').slice(0, 80);
+          const source = 'chat_reply_fallback';
+          if (isWsAudioActive()) {
+            console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
+            return;
+          }
+          console.log('[speak_api] request', { source, text: snippet });
+          const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: data.reply, emotion: 'neutral' }),
+          });
+          if (!speakResponse.ok) return;
+          const payload = await speakResponse.json();
+          playAudioFromBase64(
+            payload?.data?.audio?.base64,
+            payload?.data?.audio?.format,
+            `speak_api:${source}`,
+            snippet,
+          );
+        } catch {
+          // ignore fallback speech errors
+        }
       }
-    }
-  };
+    };
 
   const applyInteraction = async (interaction: any, userText?: string) => {
     if (!interaction) return;
@@ -1057,7 +1145,7 @@ const App: React.FC = () => {
       if (isHomeView) {
         if (assistantText) {
           setHomeChatBubble(wrapTextByWidth(assistantText));
-          void speakText(assistantText);
+          void speakText(assistantText, 'apply_interaction_home');
         }
         return;
       }
@@ -1068,7 +1156,7 @@ const App: React.FC = () => {
       if (assistantText) {
         setChatAssistantText(assistantText);
         appendTaskMessage('assistant', assistantText);
-        void speakText(assistantText);
+        void speakText(assistantText, 'apply_interaction_task');
       }
       setIsInitialTaskLocked(true);
       return;
@@ -1203,9 +1291,9 @@ const App: React.FC = () => {
 
   const handleHomeAudioClick = () => {
     if (isRecording) {
-      stopRecording();
+      stopWsAudioRecording();
     } else {
-      startRecording(sendVoiceIntent);
+      void runWsAudioTest(0, 300, 'home_voice', true);
     }
   };
 
@@ -1230,19 +1318,31 @@ const App: React.FC = () => {
               setIsInitialTaskLocked(true);
             }
             appendTaskMessage('assistant', assistantText);
-            try {
-              const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
-              });
-              if (speakResponse.ok) {
-                const payload = await speakResponse.json();
-                playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
+              try {
+                const snippet = String(interaction.audio_text ?? '').replace(/\s+/g, ' ').slice(0, 80);
+                const source = 'task_breakdown';
+                if (isWsAudioActive()) {
+                  console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
+                  return;
+                }
+                console.log('[speak_api] request', { source, text: snippet });
+                const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
+                });
+                if (speakResponse.ok) {
+                  const payload = await speakResponse.json();
+                  playAudioFromBase64(
+                    payload?.data?.audio?.base64,
+                    payload?.data?.audio?.format,
+                    `speak_api:${source}`,
+                    snippet,
+                  );
+                }
+              } catch {
+                // ignore speak errors
               }
-            } catch {
-              // ignore speak errors
-            }
           }
           await generateTasks(cleaned, shouldArchive);
           return;
@@ -1352,6 +1452,786 @@ const App: React.FC = () => {
     }
   };
 
+  // streaming test path (text-only SSE)
+  const runChatStreamTest = async (message?: string) => {
+    const text = (message ?? '').trim();
+    if (!text) {
+      console.warn('[chat-stream] empty message');
+      return;
+    }
+    const requestStart = performance.now();
+    console.log('[chat-stream] request_start_ms', Math.round(requestStart));
+    const streamId = chatStreamStateRef.current.id + 1;
+    chatStreamStateRef.current.id = streamId;
+    if (chatStreamStateRef.current.controller) {
+      chatStreamStateRef.current.controller.abort();
+    }
+    if (chatStreamStateRef.current.reader) {
+      chatStreamStateRef.current.reader.cancel().catch(() => {});
+    }
+
+    let firstChunkLogged = false;
+    let shouldStop = false;
+    let buffer = '';
+    let accumulated = '';
+    let doneLogged = false;
+    let errorLogged = false;
+
+    const controller = new AbortController();
+    chatStreamStateRef.current.controller = controller;
+
+    const response = await fetch(`${API_BASE}/interaction/chat-stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) {
+      console.warn('[chat-stream] request_failed', { status: response.status });
+      if (!errorLogged) {
+        errorLogged = true;
+        console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
+      }
+      return;
+    }
+
+    const reader = response.body.getReader();
+    chatStreamStateRef.current.reader = reader;
+    const decoder = new TextDecoder();
+    const handleEvent = (payload: any) => {
+      if (chatStreamStateRef.current.id !== streamId) return;
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type === 'partial_text') {
+        if (!firstChunkLogged) {
+          firstChunkLogged = true;
+          console.log('[chat-stream] first_chunk_ms', Math.round(performance.now() - requestStart));
+        }
+        accumulated += String(payload.text ?? '');
+        console.log('[chat-stream] partial', accumulated);
+        return;
+      }
+      if (payload.type === 'error') {
+        console.error('[chat-stream] error', payload.message);
+        if (!errorLogged) {
+          errorLogged = true;
+          console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
+        }
+        shouldStop = true;
+        return;
+      }
+      if (payload.type === 'done') {
+        if (!doneLogged) {
+          doneLogged = true;
+          console.log('[chat-stream] stream_done_ms', Math.round(performance.now() - requestStart));
+        }
+        shouldStop = true;
+      }
+    };
+
+    try {
+      while (!shouldStop) {
+        if (chatStreamStateRef.current.id !== streamId) break;
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+        for (const part of parts) {
+          const lines = part.split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data) continue;
+            try {
+              handleEvent(JSON.parse(data));
+            } catch (error) {
+              console.warn('[chat-stream] parse_error', error);
+            }
+          }
+          if (shouldStop) break;
+        }
+      }
+    } catch (error) {
+      if (!errorLogged && chatStreamStateRef.current.id === streamId) {
+        errorLogged = true;
+        console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
+        console.warn('[chat-stream] read_error', error);
+      }
+    } finally {
+      if (!doneLogged && !errorLogged && chatStreamStateRef.current.id === streamId) {
+        doneLogged = true;
+        console.log('[chat-stream] stream_done_ms', Math.round(performance.now() - requestStart));
+      }
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+      if (chatStreamStateRef.current.id === streamId) {
+        chatStreamStateRef.current.reader = null;
+        chatStreamStateRef.current.controller = null;
+      }
+    }
+  };
+
+  // chunked TTS test path (text only)
+  const runSpeakChunksTest = async (message?: string, emotion?: string) => {
+    const text = (message ?? '').trim();
+    if (!text) {
+      console.warn('[speak-chunks] empty text');
+      return;
+    }
+    const requestStart = performance.now();
+    console.log('[speak-chunks] request_start_ms', Math.round(requestStart));
+
+    const runId = speakChunksStateRef.current.id + 1;
+    speakChunksStateRef.current.id = runId;
+    if (speakChunksStateRef.current.controller) {
+      speakChunksStateRef.current.controller.abort();
+    }
+    const controller = new AbortController();
+    speakChunksStateRef.current.controller = controller;
+
+    if (speakChunksStateRef.current.audio) {
+      speakChunksStateRef.current.audio.pause();
+      speakChunksStateRef.current.audio.currentTime = 0;
+      speakChunksStateRef.current.audio.src = '';
+    }
+
+    let payload: any;
+    try {
+      const response = await fetch(`${API_BASE}/interaction/speak-chunks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          emotion: (emotion || 'neutral').trim() || 'neutral',
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        console.warn('[speak-chunks] request_failed', { status: response.status });
+        return;
+      }
+      payload = await response.json();
+    } catch (error) {
+      if (controller.signal.aborted) {
+        console.warn('[speak-chunks] aborted');
+        return;
+      }
+      console.warn('[speak-chunks] request_error', error);
+      return;
+    }
+
+    console.log('[speak-chunks] response_received_ms', Math.round(performance.now() - requestStart));
+    const chunks = Array.isArray(payload?.chunks) ? payload.chunks : [];
+    if (!chunks.length) {
+      console.warn('[speak-chunks] empty chunks');
+      return;
+    }
+
+    const audio = new Audio();
+    audio.preload = 'auto';
+    speakChunksStateRef.current.audio = audio;
+
+    const playChunk = (src: string) =>
+      new Promise<void>((resolve, reject) => {
+        if (controller.signal.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        const onEnded = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error('audio error'));
+        };
+        const onAbort = () => {
+          cleanup();
+          audio.pause();
+          audio.src = '';
+          reject(new DOMException('Aborted', 'AbortError'));
+        };
+        const cleanup = () => {
+          audio.removeEventListener('ended', onEnded);
+          audio.removeEventListener('error', onError);
+          controller.signal.removeEventListener('abort', onAbort);
+        };
+        audio.addEventListener('ended', onEnded);
+        audio.addEventListener('error', onError);
+        controller.signal.addEventListener('abort', onAbort);
+        audio.src = src;
+        audio.currentTime = 0;
+        audio.play().catch((error) => {
+          cleanup();
+          reject(error);
+        });
+      });
+
+    let firstChunkLogged = false;
+    for (const chunk of chunks) {
+      if (controller.signal.aborted || speakChunksStateRef.current.id !== runId) return;
+      const audioBase64 = chunk?.audio_base64;
+      if (!audioBase64) {
+        console.warn('[speak-chunks] missing audio', { index: chunk?.index });
+        return;
+      }
+      const mime = chunk?.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+      const dataUrl = `data:${mime};base64,${audioBase64}`;
+      console.log('[speak-chunks] play_start', { index: chunk?.index, text: chunk?.text });
+      if (!firstChunkLogged) {
+        firstChunkLogged = true;
+        console.log('[speak-chunks] first_chunk_play_start_ms', Math.round(performance.now() - requestStart));
+      }
+      try {
+        await playChunk(dataUrl);
+      } catch (error) {
+        if (controller.signal.aborted || speakChunksStateRef.current.id !== runId) {
+          console.warn('[speak-chunks] aborted');
+          return;
+        }
+        console.warn('[speak-chunks] play_error', error);
+        return;
+      }
+      console.log('[speak-chunks] play_end', { index: chunk?.index });
+    }
+    console.log('[speak-chunks] final_chunk_play_end_ms', Math.round(performance.now() - requestStart));
+    if (speakChunksStateRef.current.id === runId) {
+      speakChunksStateRef.current.controller = null;
+    }
+  };
+
+  // WebSocket test path (mock protocol only)
+  const runWsTest = (message?: string) => {
+    const text = (message ?? '').trim();
+    const requestStart = performance.now();
+    console.log('[ws-test] request_start_ms', Math.round(requestStart));
+
+    const runId = wsTestStateRef.current.id + 1;
+    wsTestStateRef.current.id = runId;
+    if (wsTestStateRef.current.socket) {
+      wsTestStateRef.current.socket.close(1000, 'replaced');
+    }
+
+    const socket = new WebSocket(buildWsUrl('/interaction/ws'));
+    wsTestStateRef.current.socket = socket;
+    const turnId = `turn-${Date.now()}`;
+    let firstMessageLogged = false;
+    let firstPartialLogged = false;
+    let doneLogged = false;
+    let errorLogged = false;
+
+    socket.addEventListener('open', () => {
+      if (wsTestStateRef.current.id !== runId) {
+        socket.close(1000, 'stale');
+        return;
+      }
+      console.log('[ws-test] ws_connect_ms', Math.round(performance.now() - requestStart));
+      socket.send(JSON.stringify({ type: 'start_turn', turn_id: turnId, text }));
+      socket.send(JSON.stringify({ type: 'end_audio', turn_id: turnId }));
+    });
+
+    socket.addEventListener('message', (event) => {
+      if (wsTestStateRef.current.id !== runId) return;
+      if (!firstMessageLogged) {
+        firstMessageLogged = true;
+        console.log('[ws-test] first_message_ms', Math.round(performance.now() - requestStart));
+      }
+      let payload: any;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        console.warn('[ws-test] parse_error', error);
+        return;
+      }
+      console.log('[ws-test] message', payload);
+      if (payload?.type === 'partial_text' && !firstPartialLogged) {
+        firstPartialLogged = true;
+        console.log('[ws-test] first_partial_text_ms', Math.round(performance.now() - requestStart));
+      }
+      if (payload?.type === 'done') {
+        if (!doneLogged) {
+          doneLogged = true;
+          console.log('[ws-test] ws_done_ms', Math.round(performance.now() - requestStart));
+        }
+        socket.close(1000, 'done');
+        return;
+      }
+      if (payload?.type === 'error') {
+        if (!errorLogged) {
+          errorLogged = true;
+          console.log('[ws-test] ws_error_ms', Math.round(performance.now() - requestStart));
+        }
+        socket.close(1000, 'error');
+      }
+    });
+
+    socket.addEventListener('error', () => {
+      if (wsTestStateRef.current.id !== runId) return;
+      if (!errorLogged) {
+        errorLogged = true;
+        console.log('[ws-test] ws_error_ms', Math.round(performance.now() - requestStart));
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      if (wsTestStateRef.current.id !== runId) return;
+      if (!doneLogged && !errorLogged) {
+        console.log('[ws-test] ws_done_ms', Math.round(performance.now() - requestStart));
+      }
+      wsTestStateRef.current.socket = null;
+    });
+  };
+
+  // WS audio full loop test path (audio -> ASR fallback -> LLM -> chunked TTS)
+    const runWsAudioTest = async (
+      durationMs = 3000,
+      chunkMs = 300,
+      message = 'ws audio test',
+      useUi = false,
+    ) => {
+    if (isRecording || mediaRecorderRef.current || wsAudioStateRef.current.recorder) {
+      console.warn('[ws-audio] recording already active');
+      return;
+    }
+      const requestStart = performance.now();
+      console.log('[ws-audio] ws_audio_record_start_ms', Math.round(performance.now() - requestStart));
+      if (audioPlayerRef.current) {
+        console.log('[ws-audio] audio_player_reset', {
+          hadSrc: Boolean(audioPlayerRef.current.src),
+          paused: audioPlayerRef.current.paused,
+        });
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current.currentTime = 0;
+        audioPlayerRef.current.src = '';
+      }
+      let assistantBuffer = '';
+      let thinkingStarted = false;
+      let recorderStarted = false;
+      let allowEnd = true;
+    const watchdogMs = 30000;
+    const clearWatchdog = () => {
+      if (wsAudioStateRef.current.watchdogTimer) {
+        window.clearTimeout(wsAudioStateRef.current.watchdogTimer);
+        wsAudioStateRef.current.watchdogTimer = null;
+      }
+    };
+    const triggerWatchdog = (reason: string) => {
+      if (!useUi || wsAudioStateRef.current.watchdogTimer) return;
+      wsAudioStateRef.current.watchdogTimer = window.setTimeout(() => {
+        console.warn('[ws-audio] watchdog_timeout_triggered', { reason });
+        allowEnd = false;
+        wsAudioStateRef.current.stopRequested = false;
+        setIsRecording(false);
+        endThinkingOnce();
+        if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
+          wsAudioStateRef.current.recorder.stop();
+        }
+        if (wsAudioStateRef.current.socket?.readyState === WebSocket.OPEN) {
+          wsAudioStateRef.current.socket.close(1000, 'watchdog_timeout');
+        }
+        setIsAvatarSpeaking(false);
+        if (useUi) {
+          const hint = '响应超时，请重试。';
+          setChatAssistantText(hint);
+          if (isHomeView) {
+            setHomeChatBubble(wrapTextByWidth(hint));
+          }
+        }
+      }, watchdogMs);
+    };
+    const startThinkingOnce = () => {
+      if (!useUi || thinkingStarted) return;
+      thinkingStarted = true;
+      beginThinking();
+    };
+    const endThinkingOnce = () => {
+      if (!useUi || !thinkingStarted) return;
+      thinkingStarted = false;
+      endThinking();
+    };
+    if (useUi) {
+      setChatAssistantText('');
+      if (isHomeView) {
+        setHomeChatBubble('');
+      }
+    }
+
+    const runId = wsAudioStateRef.current.id + 1;
+    wsAudioStateRef.current.id = runId;
+    wsAudioStateRef.current.stopRequested = false;
+    wsAudioStateRef.current.useUi = useUi;
+    clearWatchdog();
+    if (wsAudioStateRef.current.socket) {
+      wsAudioStateRef.current.socket.close(1000, 'replaced');
+    }
+    if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
+      wsAudioStateRef.current.recorder.stop();
+    }
+    if (wsAudioStateRef.current.stream) {
+      wsAudioStateRef.current.stream.getTracks().forEach((track) => track.stop());
+    }
+    if (wsAudioStateRef.current.stopTimer) {
+      window.clearTimeout(wsAudioStateRef.current.stopTimer);
+      wsAudioStateRef.current.stopTimer = null;
+    }
+    if (wsAudioStateRef.current.audio) {
+      wsAudioStateRef.current.audio.pause();
+      wsAudioStateRef.current.audio.currentTime = 0;
+      wsAudioStateRef.current.audio.src = '';
+      wsAudioStateRef.current.audio = null;
+    }
+
+    const socket = new WebSocket(buildWsUrl('/interaction/ws'));
+    wsAudioStateRef.current.socket = socket;
+    const turnId = `turn-audio-${Date.now()}`;
+    let firstChunkLogged = false;
+    let totalChunks = 0;
+    let pendingSends = 0;
+    let firstPartialLogged = false;
+    let firstPartialTextLogged = false;
+    let doneLogged = false;
+    let errorLogged = false;
+    let firstAudioChunkReceivedLogged = false;
+    let firstAudioPlayLogged = false;
+    let finalAudioPlayLogged = false;
+    let expectedSeq = 0;
+    const audioQueue = new Map<number, { audio: string; format?: string; text?: string }>();
+    const audioPlayer = ensureAudioPlayer();
+    wsAudioStateRef.current.audio = audioPlayer;
+
+    const maybeSendEnd = () => {
+      if (!allowEnd) return;
+      if (!wsAudioStateRef.current.stopRequested || pendingSends > 0) return;
+      if (socket.readyState !== WebSocket.OPEN) return;
+      startThinkingOnce();
+      socket.send(JSON.stringify({ type: 'end_audio', turn_id: turnId }));
+      triggerWatchdog('await_done');
+    };
+
+    const blobToBase64 = async (blob: Blob) => {
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 1) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    };
+
+    socket.addEventListener('open', async () => {
+      if (wsAudioStateRef.current.id !== runId) {
+        socket.close(1000, 'stale');
+        return;
+      }
+      if (useUi) {
+        console.log('[ws-audio] ws_connect_ms', Math.round(performance.now() - requestStart));
+      }
+      socket.send(JSON.stringify({
+        type: 'start_turn',
+        turn_id: turnId,
+        text: message,
+        mode: 'audio',
+      }));
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (error) {
+        console.warn('[ws-audio] getUserMedia failed', error);
+        socket.close(1000, 'mic_failed');
+        if (useUi) {
+          console.warn('[ws-audio] fallback_triggered');
+          startRecording(sendVoiceIntent);
+        }
+        return;
+      }
+
+      if (wsAudioStateRef.current.id !== runId) {
+        stream.getTracks().forEach((track) => track.stop());
+        socket.close(1000, 'stale');
+        return;
+      }
+
+      const recorder = new MediaRecorder(stream);
+      wsAudioStateRef.current.recorder = recorder;
+      wsAudioStateRef.current.stream = stream;
+      recorderStarted = true;
+      let seq = 0;
+      const mimeType = recorder.mimeType || 'audio/webm';
+
+      recorder.ondataavailable = async (event) => {
+        if (wsAudioStateRef.current.id !== runId) return;
+        if (!event.data || event.data.size === 0) return;
+        if (socket.readyState !== WebSocket.OPEN) return;
+        pendingSends += 1;
+        const currentSeq = seq;
+        seq += 1;
+        try {
+          const audio = await blobToBase64(event.data);
+          if (!firstChunkLogged) {
+            firstChunkLogged = true;
+            console.log('[ws-audio] first_audio_chunk_sent_ms', Math.round(performance.now() - requestStart));
+          }
+          totalChunks += 1;
+          socket.send(JSON.stringify({
+            type: 'audio_chunk',
+            turn_id: turnId,
+            seq: currentSeq,
+            audio,
+            mime_type: mimeType,
+            mock: false,
+          }));
+        } catch (error) {
+          console.warn('[ws-audio] chunk_encode_failed', error);
+        } finally {
+          pendingSends -= 1;
+          maybeSendEnd();
+        }
+      };
+
+      recorder.onstop = () => {
+        if (wsAudioStateRef.current.id !== runId) return;
+        wsAudioStateRef.current.stopRequested = true;
+        stream.getTracks().forEach((track) => track.stop());
+        wsAudioStateRef.current.stream = null;
+        wsAudioStateRef.current.recorder = null;
+        setIsRecording(false);
+        console.log('[ws-audio] ws_audio_record_stop_ms', Math.round(performance.now() - requestStart));
+        console.log('[ws-audio] total_chunks_sent', totalChunks);
+        maybeSendEnd();
+      };
+
+      recorder.start(chunkMs);
+      setIsRecording(true);
+      if (durationMs > 0) {
+        wsAudioStateRef.current.stopTimer = window.setTimeout(() => {
+          if (recorder.state !== 'inactive') {
+            recorder.stop();
+          }
+        }, durationMs);
+      }
+    });
+
+    socket.addEventListener('close', () => {
+      if (wsAudioStateRef.current.id !== runId) return;
+      clearWatchdog();
+      if (wsAudioStateRef.current.stopTimer) {
+        window.clearTimeout(wsAudioStateRef.current.stopTimer);
+        wsAudioStateRef.current.stopTimer = null;
+      }
+      if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
+        wsAudioStateRef.current.recorder.stop();
+      }
+      if (wsAudioStateRef.current.stream) {
+        wsAudioStateRef.current.stream.getTracks().forEach((track) => track.stop());
+      }
+      if (wsAudioStateRef.current.audio) {
+        wsAudioStateRef.current.audio.pause();
+        wsAudioStateRef.current.audio.currentTime = 0;
+        wsAudioStateRef.current.audio.src = '';
+      }
+      wsAudioStateRef.current.recorder = null;
+      wsAudioStateRef.current.stream = null;
+      wsAudioStateRef.current.socket = null;
+      wsAudioStateRef.current.audio = null;
+      wsAudioStateRef.current.stopRequested = false;
+      wsAudioStateRef.current.useUi = false;
+      wsAudioStateRef.current.watchdogTimer = null;
+      setIsRecording(false);
+      setIsAvatarSpeaking(false);
+      endThinkingOnce();
+    });
+
+    socket.addEventListener('message', (event) => {
+      if (wsAudioStateRef.current.id !== runId) return;
+      let payload: any;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        console.warn('[ws-audio] parse_error', error);
+        return;
+      }
+      console.log('[ws-audio] message', payload);
+      if (payload?.type === 'partial_asr') {
+        if (!firstPartialLogged) {
+          firstPartialLogged = true;
+          console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
+        }
+        console.log('[ws-audio] partial_asr', payload.text);
+        if (useUi && payload?.text) {
+          setChatUserText(payload.text);
+        }
+      }
+      if (payload?.type === 'partial_text') {
+        if (!firstPartialTextLogged) {
+          firstPartialTextLogged = true;
+          console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
+        }
+        const fragment = String(payload.text ?? '');
+        assistantBuffer += fragment;
+        console.log('[ws-audio] partial_text', fragment);
+        if (useUi) {
+          setChatAssistantText(assistantBuffer);
+          if (isHomeView) {
+            setHomeChatBubble(wrapTextByWidth(assistantBuffer));
+          }
+        }
+      }
+        if (payload?.type === 'audio_chunk') {
+          const seq = typeof payload.seq === 'number' ? payload.seq : null;
+          if (seq === null) {
+            console.warn('[ws-audio] audio_chunk missing seq');
+            return;
+        }
+          if (!payload.audio) {
+            console.warn('[ws-audio] audio_chunk missing audio', { seq });
+            return;
+          }
+          console.log('[ws-audio] audio_chunk_received', {
+            seq,
+            text: payload.text,
+            audio_len: typeof payload.audio === 'string' ? payload.audio.length : 0,
+            source: payload.source,
+          });
+          if (!firstAudioChunkReceivedLogged) {
+            firstAudioChunkReceivedLogged = true;
+            console.log('[ws-audio] first_audio_chunk_received_ms', Math.round(performance.now() - requestStart));
+          }
+        if (seq < expectedSeq) {
+          console.warn('[ws-audio] audio_chunk out_of_order', { expectedSeq, seq });
+        } else if (seq > expectedSeq && !audioQueue.has(expectedSeq)) {
+          console.warn('[ws-audio] audio_chunk gap_detected', { expectedSeq, seq });
+        }
+        audioQueue.set(seq, {
+          audio: payload.audio,
+          format: payload.format,
+          text: payload.text,
+        });
+
+        const playNext = async () => {
+          if (audioPlayer.src && !audioPlayer.paused) return;
+            const next = audioQueue.get(expectedSeq);
+            if (!next) return;
+            audioQueue.delete(expectedSeq);
+            expectedSeq += 1;
+            console.log('[ws-audio] audio_chunk_play', {
+              seq: expectedSeq - 1,
+              text: next.text,
+              audio_len: typeof next.audio === 'string' ? next.audio.length : 0,
+            });
+            const mime = next.format === 'wav' ? 'audio/wav' : 'audio/mpeg';
+            console.log('[audio] src_set', {
+              source: 'ws_audio',
+              seq: expectedSeq - 1,
+              text: next.text,
+              audio_len: typeof next.audio === 'string' ? next.audio.length : 0,
+            });
+            audioPlayer.src = `data:${mime};base64,${next.audio}`;
+            audioPlayer.currentTime = 0;
+            if (!firstAudioPlayLogged) {
+              firstAudioPlayLogged = true;
+              console.log('[ws-audio] first_audio_play_start_ms', Math.round(performance.now() - requestStart));
+            }
+            try {
+              console.log('[audio] play', { source: 'ws_audio', seq: expectedSeq - 1, text: next.text });
+              await audioPlayer.play();
+          } catch (error) {
+            console.warn('[ws-audio] playback_error', error);
+            console.warn('[ws-audio] audio_play_error', error);
+            endThinkingOnce();
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.close(1000, 'play_error');
+            }
+            return;
+          }
+          audioPlayer.onended = () => {
+            if (audioQueue.size === 0 && doneLogged && !finalAudioPlayLogged) {
+              finalAudioPlayLogged = true;
+              console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
+            }
+            playNext();
+          };
+        };
+
+        playNext();
+      }
+      if (payload?.type === 'done') {
+        if (!doneLogged) {
+          doneLogged = true;
+          console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
+        }
+        clearWatchdog();
+        if (audioQueue.size > 0) {
+          const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
+          console.warn('[ws-audio] audio_chunks_pending', { expectedSeq, pendingSeqs });
+        }
+        if (audioQueue.size === 0 && audioPlayer.paused && !finalAudioPlayLogged) {
+          finalAudioPlayLogged = true;
+          console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
+        }
+        endThinkingOnce();
+      }
+      if (payload?.type === 'error') {
+        if (!errorLogged) {
+          errorLogged = true;
+          console.log('[ws-audio] ws_error_ms', Math.round(performance.now() - requestStart));
+        }
+        clearWatchdog();
+        if (payload?.error_stage === 'tts') {
+          console.warn('[ws-audio] tts_error', payload.message);
+        }
+        if (payload?.message === 'empty_asr_text') {
+          console.warn('[ws-audio] empty_asr_detected');
+        }
+        if (useUi && payload?.message === 'empty_asr_text') {
+          const hint = '刚才没听清楚，请再试一次。';
+          setChatAssistantText(hint);
+          if (isHomeView) {
+            setHomeChatBubble(wrapTextByWidth(hint));
+          }
+        }
+        allowEnd = false;
+        endThinkingOnce();
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.close(1000, 'error');
+        }
+      }
+    });
+
+    socket.addEventListener('error', (event) => {
+      if (wsAudioStateRef.current.id !== runId) return;
+      if (!errorLogged) {
+        errorLogged = true;
+        console.log('[ws-audio] ws_error_ms', Math.round(performance.now() - requestStart));
+      }
+      allowEnd = false;
+      clearWatchdog();
+      endThinkingOnce();
+      console.warn('[ws-audio] socket_error', event);
+      if (useUi && !recorderStarted) {
+        console.warn('[ws-audio] fallback_triggered');
+        startRecording(sendVoiceIntent);
+      }
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close(1000, 'error');
+      }
+    });
+  };
+
+  const stopWsAudioRecording = () => {
+    if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
+      wsAudioStateRef.current.stopRequested = true;
+      wsAudioStateRef.current.recorder.stop();
+      return;
+    }
+    if (wsAudioStateRef.current.socket) {
+      wsAudioStateRef.current.socket.close(1000, 'manual_stop');
+    }
+  };
+
   const handleFocusAudioClick = () => {
     if (isRecording) {
       stopRecording();
@@ -1410,6 +2290,34 @@ const App: React.FC = () => {
       if (typeof off === 'function') off();
     };
   }, [isFocusView]);
+
+  useEffect(() => {
+    (window as any).__flowmateChatStreamTest = runChatStreamTest;
+    return () => {
+      delete (window as any).__flowmateChatStreamTest;
+    };
+  }, []);
+
+  useEffect(() => {
+    (window as any).__flowmateSpeakChunksTest = runSpeakChunksTest;
+    return () => {
+      delete (window as any).__flowmateSpeakChunksTest;
+    };
+  }, []);
+
+  useEffect(() => {
+    (window as any).__flowmateWsTest = runWsTest;
+    return () => {
+      delete (window as any).__flowmateWsTest;
+    };
+  }, []);
+
+  useEffect(() => {
+    (window as any).__flowmateWsAudioTest = runWsAudioTest;
+    return () => {
+      delete (window as any).__flowmateWsAudioTest;
+    };
+  }, []);
 
   const animateList = (
     items: TodoItem[],
@@ -1485,8 +2393,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!isHomeView || homeChatBubble) return;
+    if (isWsAudioActive()) {
+      console.log('[home] welcome_suppressed_during_ws');
+      return;
+    }
     setHomeChatBubble(wrapTextByWidth(HOME_WELCOME_TEXT));
-    void speakText(HOME_WELCOME_TEXT);
+    void speakText(HOME_WELCOME_TEXT, 'home_welcome');
   }, [isHomeView, homeChatBubble]);
 
   useEffect(() => {

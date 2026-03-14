@@ -3,14 +3,17 @@ FlowMate-Echo Interaction API
 Interaction-related routes
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
+import base64
 import random
 import time
+import json
+import asyncio
 
 try:
     from zoneinfo import ZoneInfo
@@ -19,9 +22,13 @@ except Exception:  # pragma: no cover - fallback for older environments
 
 from core import agent_brain, flow_manager
 from services import audio_service, voice_pipeline_service
-from services.interaction_service import process_user_intent
+from services.interaction_service import process_user_intent, stream_chat_reply
+from services.streaming_asr_adapter import StreamingAsrAdapter
 
 router = APIRouter()
+
+def _sse_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=True)}\n\n"
 
 
 class TaskGenerationRequest(BaseModel):
@@ -60,6 +67,12 @@ class SpeakRequest(BaseModel):
     """Voice + motion driver request."""
     text: str
     emotion: str  # strict / encouraging / neutral / shush
+
+
+class SpeakChunksRequest(BaseModel):
+    """Chunked TTS test request."""
+    text: str
+    emotion: Optional[str] = "neutral"
 
 
 class VoicePipelineResponse(BaseModel):
@@ -177,6 +190,583 @@ async def speak(request: SpeakRequest):
     return payload
 
 
+def _split_text_into_sentences(text: str, max_len: int = 80) -> List[str]:
+    punctuation = set("。！？!?")
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    sentences: List[str] = []
+    current = ""
+    for ch in cleaned:
+        current += ch
+        if ch in punctuation:
+            if current.strip():
+                sentences.append(current.strip())
+            current = ""
+    if current.strip():
+        sentences.append(current.strip())
+
+    chunks: List[str] = []
+    for sentence in sentences:
+        if len(sentence) <= max_len:
+            chunks.append(sentence)
+        else:
+            start = 0
+            while start < len(sentence):
+                part = sentence[start:start + max_len].strip()
+                if part:
+                    chunks.append(part)
+                start += max_len
+    return chunks
+
+
+@router.post("/speak-chunks")
+async def speak_chunks(request: SpeakChunksRequest):
+    """Chunked TTS test endpoint (text only)."""
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    emotion = (request.emotion or "neutral").strip()
+    sentences = _split_text_into_sentences(request.text)
+    if not sentences:
+        raise HTTPException(status_code=400, detail="No valid sentence chunks")
+
+    start = time.perf_counter()
+    results = await audio_service.speak_chunks(sentences, emotion)
+    chunks = []
+    timings = {"chunk_tts_ms": [], "total_ms": 0}
+
+    for index, (sentence, result) in enumerate(zip(sentences, results)):
+        status = result.get("status")
+        audio_b64 = result.get("audio_data") or ""
+        if status == "error" or not audio_b64:
+            error_payload = result.get("error") or {}
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": error_payload.get("message") or "TTS failed",
+                    "error_stage": "tts",
+                    "index": index,
+                    "text": sentence,
+                },
+            )
+        chunks.append({
+            "index": index,
+            "text": sentence,
+            "audio_base64": audio_b64,
+            "format": result.get("format", "mp3"),
+            "sample_rate": result.get("sample_rate", 24000),
+            "estimated_duration_ms": result.get("estimated_duration_ms", 0),
+        })
+        timings["chunk_tts_ms"].append({
+            "index": index,
+            "tts_ms": result.get("_tts_ms", 0),
+        })
+
+    timings["total_ms"] = int((time.perf_counter() - start) * 1000)
+    return {"chunks": chunks, "timings": timings}
+
+
+@router.websocket("/ws")
+async def interaction_ws(websocket: WebSocket):
+    """WebSocket test path (LLM streaming + WS audio uplink + ASR fallback + TTS chunks)."""
+    await websocket.accept()
+    connection_start = time.perf_counter()
+    current_turn_token = 0
+    sequence_task: Optional[asyncio.Task] = None
+    active_turn_id: Optional[str] = None
+    asr_adapter = StreamingAsrAdapter()
+    audio_buffers = {}
+    turn_modes = {}
+    turn_tokens = {}
+
+    async def send(payload: dict) -> None:
+        await websocket.send_text(json.dumps(payload, ensure_ascii=True))
+
+    async def stream_llm_sequence(
+        turn_token: int,
+        turn_id: str,
+        prompt_text: str,
+        source_label: str,
+        enable_tts: bool = False,
+        tts_emotion: str = "neutral",
+    ) -> None:
+        # WS early-audio incremental TTS path (sentence-buffered, post-LLM streaming)
+        first_partial_logged = False
+        start = time.perf_counter()
+        has_any_text = False
+        sentence_buffer = ""
+        punctuation = set("。！？!?")
+        tts_queue: Optional[asyncio.Queue] = None
+        tts_task: Optional[asyncio.Task] = None
+        tts_failed = False
+        tts_seq = 0
+        first_tts_logged = False
+        first_tts_sentence_logged = False
+        first_audio_sent_logged = False
+        print(
+            "[ws] llm_stream_start_ms="
+            f"{int((start - connection_start) * 1000)} turn_id={turn_id} source={source_label}"
+        )
+        try:
+            if turn_token != current_turn_token:
+                return
+
+            if enable_tts:
+                tts_queue = asyncio.Queue()
+
+                async def tts_worker() -> None:
+                    nonlocal tts_seq, tts_failed, first_tts_logged, first_audio_sent_logged
+                    while True:
+                        sentence = await tts_queue.get()
+                        if sentence is None:
+                            return
+                        if turn_token != current_turn_token:
+                            return
+                        if not first_tts_logged:
+                            first_tts_logged = True
+                            print(
+                                "[ws] first_tts_chunk_start_ms="
+                                f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+                            )
+                        snippet = (sentence or "").replace("\n", " ").strip()
+                        if len(snippet) > 80:
+                            snippet = f"{snippet[:80]}..."
+                        print(
+                            "[ws] tts_chunk_request "
+                            f"turn_id={turn_id} seq={tts_seq} source=llm_stream "
+                            f"prompt_source={source_label} text={snippet}"
+                        )
+                        try:
+                            results = await audio_service.speak_chunks([sentence], tts_emotion)
+                        except Exception as exc:
+                            tts_failed = True
+                            await send({
+                                "type": "error",
+                                "turn_id": turn_id,
+                                "message": str(exc),
+                                "error_stage": "tts",
+                            })
+                            await send({
+                                "type": "done",
+                                "turn_id": turn_id,
+                                "reason": "tts_error",
+                            })
+                            return
+                        result = results[0] if results else {}
+                        audio_b64 = result.get("audio_data") or ""
+                        print(
+                            "[ws] tts_chunk_result "
+                            f"turn_id={turn_id} seq={tts_seq} status={result.get('status')} "
+                            f"audio_len={len(audio_b64)}"
+                        )
+                        if result.get("status") == "error" or not audio_b64:
+                            error_payload = result.get("error") or {}
+                            tts_failed = True
+                            await send({
+                                "type": "error",
+                                "turn_id": turn_id,
+                                "message": error_payload.get("message") or "TTS failed",
+                                "error_stage": "tts",
+                            })
+                            await send({
+                                "type": "done",
+                                "turn_id": turn_id,
+                                "reason": "tts_error",
+                            })
+                            return
+                        await send({
+                            "type": "audio_chunk",
+                            "turn_id": turn_id,
+                            "seq": tts_seq,
+                            "audio": audio_b64,
+                            "format": result.get("format", "mp3"),
+                            "text": sentence,
+                            "mock": False,
+                            "source": "tts_chunked",
+                        })
+                        print(
+                            "[ws] audio_chunk_sent "
+                            f"turn_id={turn_id} seq={tts_seq} audio_len={len(audio_b64)} text={snippet}"
+                        )
+                        if not first_audio_sent_logged:
+                            first_audio_sent_logged = True
+                            print(
+                                "[ws] first_audio_chunk_sent_ms="
+                                f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+                            )
+                        tts_seq += 1
+
+                tts_task = asyncio.create_task(tts_worker())
+
+            async for chunk in stream_chat_reply(prompt_text):
+                if turn_token != current_turn_token:
+                    return
+                if chunk:
+                    has_any_text = True
+                    if not first_partial_logged:
+                        first_partial_logged = True
+                        elapsed = int((time.perf_counter() - start) * 1000)
+                        print(f"[ws] first_partial_text_ms={elapsed} turn_id={turn_id}")
+                    await send({
+                        "type": "partial_text",
+                        "turn_id": turn_id,
+                        "text": chunk,
+                        "mock": False,
+                        "source": "llm",
+                    })
+                    if enable_tts and tts_queue is not None:
+                        sentence_buffer += chunk
+                        trimmed = sentence_buffer.rstrip()
+                        if trimmed:
+                            ends_with_punct = trimmed[-1] in punctuation
+                        else:
+                            ends_with_punct = False
+                        pieces = _split_text_into_sentences(sentence_buffer)
+                        if pieces:
+                            if ends_with_punct:
+                                complete = pieces
+                                sentence_buffer = ""
+                            else:
+                                complete = pieces[:-1]
+                                sentence_buffer = pieces[-1] if pieces else ""
+                            for sentence in complete:
+                                if sentence:
+                                    if not first_tts_sentence_logged:
+                                        first_tts_sentence_logged = True
+                                        print(
+                                            "[ws] first_tts_sentence_queued_ms="
+                                            f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+                                        )
+                                    await tts_queue.put(sentence)
+                    if tts_failed:
+                        return
+
+            if turn_token != current_turn_token:
+                return
+            if enable_tts:
+                if not has_any_text and not sentence_buffer.strip():
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "empty_llm_text",
+                        "error_stage": "llm",
+                    })
+                    await send({
+                        "type": "done",
+                        "turn_id": turn_id,
+                        "reason": "llm_empty",
+                    })
+                    if tts_task is not None:
+                        tts_task.cancel()
+                    return
+                if sentence_buffer.strip() and tts_queue is not None:
+                    await tts_queue.put(sentence_buffer.strip())
+                    sentence_buffer = ""
+                if tts_queue is not None:
+                    await tts_queue.put(None)
+                if tts_task is not None:
+                    await tts_task
+                if tts_failed:
+                    return
+
+            await send({
+                "type": "done",
+                "turn_id": turn_id,
+            })
+            print(
+                "[ws] ws_turn_done_ms="
+                f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+            )
+            print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=done")
+            audio_buffers.pop(turn_id, None)
+            turn_modes.pop(turn_id, None)
+            turn_tokens.pop(turn_id, None)
+            asr_adapter.close_session(turn_id, reason="llm_done")
+        except asyncio.CancelledError:
+            if tts_task is not None:
+                tts_task.cancel()
+            return
+        except Exception as exc:
+            if turn_token == current_turn_token:
+                await send({
+                    "type": "error",
+                    "turn_id": turn_id,
+                    "message": str(exc),
+                })
+                await send({
+                    "type": "done",
+                    "turn_id": turn_id,
+                    "reason": "error",
+                })
+                print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=error")
+                audio_buffers.pop(turn_id, None)
+                turn_modes.pop(turn_id, None)
+                turn_tokens.pop(turn_id, None)
+                asr_adapter.close_session(turn_id, reason="llm_error")
+
+    try:
+        while True:
+            try:
+                raw = await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await send({"type": "error", "message": "invalid_json"})
+                continue
+
+            message_type = payload.get("type")
+            if message_type == "start_turn":
+                current_turn_token += 1
+                turn_token = current_turn_token
+                if sequence_task:
+                    sequence_task.cancel()
+                if active_turn_id:
+                    print(f"[ws] ws_turn_cleanup turn_id={active_turn_id} reason=replaced")
+                    audio_buffers.pop(active_turn_id, None)
+                    turn_modes.pop(active_turn_id, None)
+                    turn_tokens.pop(active_turn_id, None)
+                active_turn_id = payload.get("turn_id") or f"turn-{turn_token}"
+                await send({
+                    "type": "ack",
+                    "turn_id": active_turn_id,
+                    "message": "start_turn",
+                })
+                audio_buffers[active_turn_id] = {
+                    "total_bytes": 0,
+                    "count": 0,
+                    "start": time.perf_counter(),
+                    "first_chunk_at": None,
+                    "last_seq": -1,
+                    "mime_type": None,
+                }
+                asr_adapter.start_session(active_turn_id)
+                turn_tokens[active_turn_id] = turn_token
+                mode = (payload.get("mode") or "text").strip().lower()
+                turn_modes[active_turn_id] = mode
+                print(f"[ws] turn_start turn_id={active_turn_id} mode={mode}")
+                prompt_text = (payload.get("text") or "").strip()
+                if mode != "audio":
+                    if not prompt_text:
+                        await send({
+                            "type": "error",
+                            "turn_id": active_turn_id,
+                            "message": "empty_text",
+                        })
+                        await send({
+                            "type": "done",
+                            "turn_id": active_turn_id,
+                            "reason": "error",
+                        })
+                        audio_buffers.pop(active_turn_id, None)
+                        asr_adapter.close_session(active_turn_id, reason="empty_text")
+                        turn_modes.pop(active_turn_id, None)
+                        turn_tokens.pop(active_turn_id, None)
+                        continue
+                    sequence_task = asyncio.create_task(
+                        stream_llm_sequence(turn_token, active_turn_id, prompt_text, "text_path")
+                    )
+                continue
+
+            if message_type == "cancel_turn":
+                current_turn_token += 1
+                if sequence_task:
+                    sequence_task.cancel()
+                    sequence_task = None
+                turn_id = payload.get("turn_id") or active_turn_id
+                if turn_id:
+                    audio_buffers.pop(turn_id, None)
+                asr_adapter.close_session(turn_id, reason="cancel")
+                turn_modes.pop(turn_id, None)
+                turn_tokens.pop(turn_id, None)
+                if turn_id:
+                    print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=cancelled")
+                await send({
+                    "type": "ack",
+                    "turn_id": turn_id,
+                    "message": "cancel_turn",
+                })
+                await send({
+                    "type": "done",
+                    "turn_id": turn_id,
+                    "reason": "cancelled",
+                })
+                continue
+
+            if message_type == "audio_chunk":
+                turn_id = payload.get("turn_id") or active_turn_id
+                if not turn_id or turn_id not in audio_buffers:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "unknown_turn",
+                    })
+                    continue
+                audio_b64 = (payload.get("audio") or "").strip()
+                if not audio_b64:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "empty_audio_chunk",
+                    })
+                    continue
+                try:
+                    audio_bytes = base64.b64decode(audio_b64)
+                except Exception:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "invalid_audio_base64",
+                    })
+                    continue
+                if not audio_bytes:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "empty_audio_bytes",
+                    })
+                    continue
+                buffer = audio_buffers[turn_id]
+                seq = payload.get("seq")
+                if isinstance(seq, int):
+                    expected = buffer["last_seq"] + 1
+                    if buffer["last_seq"] >= 0 and seq != expected:
+                        print(
+                            "[ws] audio_chunk_seq_gap "
+                            f"expected={expected} got={seq} turn_id={turn_id}"
+                        )
+                    buffer["last_seq"] = seq
+                if buffer["first_chunk_at"] is None:
+                    buffer["first_chunk_at"] = time.perf_counter()
+                    ws_audio_start_ms = int((buffer["first_chunk_at"] - connection_start) * 1000)
+                    first_chunk_ms = int((buffer["first_chunk_at"] - buffer["start"]) * 1000)
+                    print(f"[ws] ws_audio_start_ms={ws_audio_start_ms} turn_id={turn_id}")
+                    print(f"[ws] first_audio_chunk_ms={first_chunk_ms} turn_id={turn_id}")
+                if not buffer["mime_type"]:
+                    buffer["mime_type"] = payload.get("mime_type")
+                buffer["total_bytes"] += len(audio_bytes)
+                buffer["count"] += 1
+                if not asr_adapter.push_chunk(turn_id, audio_bytes, seq, buffer["mime_type"]):
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "asr_session_missing",
+                    })
+                    continue
+                await send({
+                    "type": "ack",
+                    "turn_id": turn_id,
+                    "message": "audio_chunk",
+                })
+                continue
+
+            if message_type == "end_audio":
+                turn_id = payload.get("turn_id") or active_turn_id
+                if not turn_id or turn_id not in audio_buffers:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "unknown_turn",
+                    })
+                    continue
+                turn_token = turn_tokens.get(turn_id)
+                if turn_token is None:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "stale_turn",
+                    })
+                    continue
+                mode = turn_modes.get(turn_id) or "text"
+                buffer = audio_buffers[turn_id]
+                end_ms = int((time.perf_counter() - buffer["start"]) * 1000)
+                print(
+                    "[ws] end_audio_ms="
+                    f"{end_ms} total_audio_chunks={buffer['count']} "
+                    f"total_audio_bytes={buffer['total_bytes']} turn_id={turn_id}"
+                )
+                await send({
+                    "type": "ack",
+                    "turn_id": turn_id,
+                    "message": "end_audio",
+                })
+                if mode != "audio":
+                    audio_buffers.pop(turn_id, None)
+                    turn_modes.pop(turn_id, None)
+                    turn_tokens.pop(turn_id, None)
+                    asr_adapter.close_session(turn_id, reason="not_audio")
+                    continue
+                # WS streaming ASR test path (fallback on end_audio)
+                asr_result = await asr_adapter.finalize(turn_id)
+                if asr_result.get("status") == "success" and asr_result.get("text"):
+                    await send({
+                        "type": "partial_asr",
+                        "turn_id": turn_id,
+                        "text": asr_result.get("text"),
+                        "mock": False,
+                        "source": asr_result.get("source", "asr_fallback"),
+                        "phase": "final",
+                    })
+                    if sequence_task:
+                        sequence_task.cancel()
+                    sequence_task = asyncio.create_task(
+                        stream_llm_sequence(
+                            turn_token,
+                            turn_id,
+                            asr_result.get("text") or "",
+                            asr_result.get("source", "asr_fallback"),
+                            enable_tts=True,
+                            tts_emotion=asr_result.get("emotion", "neutral"),
+                        )
+                    )
+                elif asr_result.get("status") not in ("empty", None):
+                    error = asr_result.get("error") or {}
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": error.get("message") or "ASR failed",
+                    })
+                    await send({
+                        "type": "done",
+                        "turn_id": turn_id,
+                        "reason": "asr_error",
+                    })
+                    print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=error stage=asr_error")
+                else:
+                    await send({
+                        "type": "error",
+                        "turn_id": turn_id,
+                        "message": "empty_asr_text",
+                    })
+                    await send({
+                        "type": "done",
+                        "turn_id": turn_id,
+                        "reason": "asr_empty",
+                    })
+                    print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=error stage=asr_empty")
+                audio_buffers.pop(turn_id, None)
+                turn_modes.pop(turn_id, None)
+                turn_tokens.pop(turn_id, None)
+                continue
+
+            await send({
+                "type": "error",
+                "turn_id": payload.get("turn_id"),
+                "message": "unknown_type",
+            })
+    finally:
+        if sequence_task:
+            sequence_task.cancel()
+        audio_buffers.clear()
+        turn_modes.clear()
+        turn_tokens.clear()
+        for turn_id in list(asr_adapter.sessions.keys()):
+            print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=disconnect")
+            asr_adapter.close_session(turn_id, reason="disconnect")
+
+
 @router.post("/voice")
 async def voice_chat(
     audio: UploadFile = File(...),
@@ -232,6 +822,41 @@ async def chat(request: ChatRequest):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/chat-stream")
+async def chat_stream(request: ChatRequest):
+    """Text-only SSE stream for assistant partial text."""
+    async def event_stream():
+        start = time.perf_counter()
+        first_chunk_at = None
+
+        if not request.message or not request.message.strip():
+            yield _sse_event({"type": "error", "message": "message cannot be empty"})
+            yield _sse_event({"type": "done"})
+            return
+
+        try:
+            async for chunk in stream_chat_reply(request.message):
+                if not chunk:
+                    continue
+                if first_chunk_at is None:
+                    first_chunk_at = int((time.perf_counter() - start) * 1000)
+                    print(f"[chat-stream] first_chunk_ms={first_chunk_at}")
+                yield _sse_event({"type": "partial_text", "text": chunk})
+            yield _sse_event({"type": "done"})
+        except Exception as e:
+            yield _sse_event({"type": "error", "message": str(e)})
+            yield _sse_event({"type": "done"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post("/intent")
