@@ -1099,6 +1099,13 @@ const App: React.FC = () => {
     const id = `task-msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     setTaskMessages((prev) => [...prev, { id, role, text }]);
     setTaskTimeline((prev) => [...prev, { type: 'message', id }]);
+    return id;
+  };
+
+  const updateTaskMessage = (id: string, text: string) => {
+    setTaskMessages((prev) =>
+      prev.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
+    );
   };
 
   const generateTasks = async (description: string, archiveExisting: boolean) => {
@@ -1139,28 +1146,179 @@ const App: React.FC = () => {
     }
   };
 
-  const sendChatMessage = async (message: string) => {
-    const response = await fetch(`${API_BASE}/interaction/chat`, {
+  const runChatStream = async (
+    message: string,
+    handlers: {
+      logPrefix: string;
+      onStreamStart?: () => void;
+      onPartial?: (text: string) => void;
+      onDone?: () => void | Promise<void>;
+      onError?: (message?: string) => void;
+    },
+  ) => {
+    const text = (message ?? '').trim();
+    if (!text) {
+      console.warn(`[${handlers.logPrefix}] empty message`);
+      return;
+    }
+    const requestStart = performance.now();
+    console.log(`[${handlers.logPrefix}] request_start_ms`, Math.round(requestStart));
+    const streamId = chatStreamStateRef.current.id + 1;
+    chatStreamStateRef.current.id = streamId;
+    if (chatStreamStateRef.current.controller) {
+      chatStreamStateRef.current.controller.abort();
+    }
+    if (chatStreamStateRef.current.reader) {
+      chatStreamStateRef.current.reader.cancel().catch(() => {});
+    }
+
+    let firstChunkLogged = false;
+    let shouldStop = false;
+    let buffer = '';
+    let doneLogged = false;
+    let errorLogged = false;
+
+    const controller = new AbortController();
+    chatStreamStateRef.current.controller = controller;
+    if (handlers.onStreamStart) {
+      handlers.onStreamStart();
+    }
+
+    const response = await fetch(`${API_BASE}/interaction/chat-stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message: text }),
+      signal: controller.signal,
     });
-    if (!response.ok) return;
-    const data = await response.json();
-    if (data?.reply) {
-      const reply = sanitizeText(data.reply);
-      if (!isInitialTaskLocked) {
-        setChatAssistantText(reply);
-        setIsInitialTaskLocked(true);
+    if (!response.ok || !response.body) {
+      console.warn(`[${handlers.logPrefix}] request_failed`, { status: response.status });
+      if (!errorLogged) {
+        errorLogged = true;
+        console.log(`[${handlers.logPrefix}] stream_error_ms`, Math.round(performance.now() - requestStart));
       }
-      appendTaskMessage('assistant', reply);
+      if (handlers.onError) {
+        handlers.onError('request_failed');
+      }
+      return;
     }
-      if (data?.audio_url) {
-        playAudioFromUrl(data.audio_url, 'chat_audio_url');
-      } else if (data?.reply) {
+
+    const reader = response.body.getReader();
+    chatStreamStateRef.current.reader = reader;
+    const decoder = new TextDecoder();
+    const handleEvent = (payload: any) => {
+      if (chatStreamStateRef.current.id !== streamId) return;
+      if (!payload || typeof payload !== 'object') return;
+      if (payload.type === 'partial_text') {
+        if (!firstChunkLogged) {
+          firstChunkLogged = true;
+          console.log(`[${handlers.logPrefix}] first_chunk_ms`, Math.round(performance.now() - requestStart));
+        }
+        if (handlers.onPartial) {
+          handlers.onPartial(String(payload.text ?? ''));
+        }
+        return;
+      }
+      if (payload.type === 'error') {
+        console.error(`[${handlers.logPrefix}] error`, payload.message);
+        if (!errorLogged) {
+          errorLogged = true;
+          console.log(`[${handlers.logPrefix}] stream_error_ms`, Math.round(performance.now() - requestStart));
+        }
+        if (handlers.onError) {
+          handlers.onError(payload.message);
+        }
+        shouldStop = true;
+        return;
+      }
+      if (payload.type === 'done') {
+        if (!doneLogged) {
+          doneLogged = true;
+          console.log(`[${handlers.logPrefix}] stream_done_ms`, Math.round(performance.now() - requestStart));
+        }
+        if (handlers.onDone) {
+          void handlers.onDone();
+        }
+        shouldStop = true;
+      }
+    };
+
+    try {
+      while (!shouldStop) {
+        if (chatStreamStateRef.current.id !== streamId) break;
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+        for (const part of parts) {
+          const lines = part.split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data) continue;
+            try {
+              handleEvent(JSON.parse(data));
+            } catch (error) {
+              console.warn(`[${handlers.logPrefix}] parse_error`, error);
+            }
+          }
+          if (shouldStop) break;
+        }
+      }
+    } catch (error) {
+      if (!errorLogged && chatStreamStateRef.current.id === streamId) {
+        errorLogged = true;
+        console.log(`[${handlers.logPrefix}] stream_error_ms`, Math.round(performance.now() - requestStart));
+        console.warn(`[${handlers.logPrefix}] read_error`, error);
+      }
+      if (handlers.onError && chatStreamStateRef.current.id === streamId) {
+        handlers.onError(String((error as Error)?.message ?? 'stream_error'));
+      }
+    } finally {
+      if (!doneLogged && !errorLogged && chatStreamStateRef.current.id === streamId) {
+        doneLogged = true;
+        console.log(`[${handlers.logPrefix}] stream_done_ms`, Math.round(performance.now() - requestStart));
+        if (handlers.onDone) {
+          void handlers.onDone();
+        }
+      }
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
+      }
+      if (chatStreamStateRef.current.id === streamId) {
+        chatStreamStateRef.current.reader = null;
+        chatStreamStateRef.current.controller = null;
+      }
+    }
+  };
+
+  const sendChatMessage = async (message: string) => {
+    const cleaned = sanitizeText(message);
+    if (!cleaned) return;
+    const assistantId = appendTaskMessage('assistant', '');
+    let accumulated = '';
+    let firstChunkSeen = false;
+
+    await runChatStream(cleaned, {
+      logPrefix: 'text-stream',
+      onPartial: (chunk) => {
+        accumulated += chunk;
+        updateTaskMessage(assistantId, accumulated);
+        if (!isInitialTaskLocked) {
+          setChatAssistantText(accumulated);
+          setIsInitialTaskLocked(true);
+        }
+        if (!firstChunkSeen) {
+          firstChunkSeen = true;
+        }
+      },
+      onDone: async () => {
+        if (!accumulated) return;
         try {
-          const snippet = String(data.reply ?? '').replace(/\s+/g, ' ').slice(0, 80);
-          const source = 'chat_reply_fallback';
+          const snippet = accumulated.replace(/\s+/g, ' ').slice(0, 80);
+          const source = 'chat_stream';
           if (isWsAudioActive()) {
             console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
             return;
@@ -1169,7 +1327,7 @@ const App: React.FC = () => {
           const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: data.reply, emotion: 'neutral' }),
+            body: JSON.stringify({ text: accumulated, emotion: 'neutral' }),
           });
           if (!speakResponse.ok) return;
           const payload = await speakResponse.json();
@@ -1182,8 +1340,14 @@ const App: React.FC = () => {
         } catch {
           // ignore fallback speech errors
         }
-      }
-    };
+      },
+      onError: () => {
+        if (!firstChunkSeen) {
+          updateTaskMessage(assistantId, accumulated);
+        }
+      },
+    });
+  };
 
   const applyInteraction = async (interaction: any, userText?: string) => {
     if (!interaction) return;
@@ -1219,6 +1383,14 @@ const App: React.FC = () => {
         }
       } catch {
         // ignore storage failures
+      }
+      const confirmText = sanitizeText(
+        interaction.audio_text
+        || interaction.ui_payload?.display_text
+        || '记下来了，我已经帮你保存这条闪念。',
+      );
+      if (confirmText && isHomeView) {
+        setHomeChatBubble(wrapTextByWidth(confirmText));
       }
       return;
     }
@@ -1537,124 +1709,14 @@ const App: React.FC = () => {
 
   // streaming test path (text-only SSE)
   const runChatStreamTest = async (message?: string) => {
-    const text = (message ?? '').trim();
-    if (!text) {
-      console.warn('[chat-stream] empty message');
-      return;
-    }
-    const requestStart = performance.now();
-    console.log('[chat-stream] request_start_ms', Math.round(requestStart));
-    const streamId = chatStreamStateRef.current.id + 1;
-    chatStreamStateRef.current.id = streamId;
-    if (chatStreamStateRef.current.controller) {
-      chatStreamStateRef.current.controller.abort();
-    }
-    if (chatStreamStateRef.current.reader) {
-      chatStreamStateRef.current.reader.cancel().catch(() => {});
-    }
-
-    let firstChunkLogged = false;
-    let shouldStop = false;
-    let buffer = '';
     let accumulated = '';
-    let doneLogged = false;
-    let errorLogged = false;
-
-    const controller = new AbortController();
-    chatStreamStateRef.current.controller = controller;
-
-    const response = await fetch(`${API_BASE}/interaction/chat-stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
-      signal: controller.signal,
-    });
-    if (!response.ok || !response.body) {
-      console.warn('[chat-stream] request_failed', { status: response.status });
-      if (!errorLogged) {
-        errorLogged = true;
-        console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
-      }
-      return;
-    }
-
-    const reader = response.body.getReader();
-    chatStreamStateRef.current.reader = reader;
-    const decoder = new TextDecoder();
-    const handleEvent = (payload: any) => {
-      if (chatStreamStateRef.current.id !== streamId) return;
-      if (!payload || typeof payload !== 'object') return;
-      if (payload.type === 'partial_text') {
-        if (!firstChunkLogged) {
-          firstChunkLogged = true;
-          console.log('[chat-stream] first_chunk_ms', Math.round(performance.now() - requestStart));
-        }
-        accumulated += String(payload.text ?? '');
+    await runChatStream(message ?? '', {
+      logPrefix: 'chat-stream',
+      onPartial: (chunk) => {
+        accumulated += chunk;
         console.log('[chat-stream] partial', accumulated);
-        return;
-      }
-      if (payload.type === 'error') {
-        console.error('[chat-stream] error', payload.message);
-        if (!errorLogged) {
-          errorLogged = true;
-          console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
-        }
-        shouldStop = true;
-        return;
-      }
-      if (payload.type === 'done') {
-        if (!doneLogged) {
-          doneLogged = true;
-          console.log('[chat-stream] stream_done_ms', Math.round(performance.now() - requestStart));
-        }
-        shouldStop = true;
-      }
-    };
-
-    try {
-      while (!shouldStop) {
-        if (chatStreamStateRef.current.id !== streamId) break;
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop() ?? '';
-        for (const part of parts) {
-          const lines = part.split('\n');
-          for (const line of lines) {
-            if (!line.startsWith('data:')) continue;
-            const data = line.slice(5).trim();
-            if (!data) continue;
-            try {
-              handleEvent(JSON.parse(data));
-            } catch (error) {
-              console.warn('[chat-stream] parse_error', error);
-            }
-          }
-          if (shouldStop) break;
-        }
-      }
-    } catch (error) {
-      if (!errorLogged && chatStreamStateRef.current.id === streamId) {
-        errorLogged = true;
-        console.log('[chat-stream] stream_error_ms', Math.round(performance.now() - requestStart));
-        console.warn('[chat-stream] read_error', error);
-      }
-    } finally {
-      if (!doneLogged && !errorLogged && chatStreamStateRef.current.id === streamId) {
-        doneLogged = true;
-        console.log('[chat-stream] stream_done_ms', Math.round(performance.now() - requestStart));
-      }
-      try {
-        await reader.cancel();
-      } catch {
-        // ignore
-      }
-      if (chatStreamStateRef.current.id === streamId) {
-        chatStreamStateRef.current.reader = null;
-        chatStreamStateRef.current.controller = null;
-      }
-    }
+      },
+    });
   };
 
   // chunked TTS test path (text only)

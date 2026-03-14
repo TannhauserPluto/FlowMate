@@ -289,6 +289,7 @@ async def interaction_ws(websocket: WebSocket):
         source_label: str,
         enable_tts: bool = False,
         tts_emotion: str = "neutral",
+        task_type: str = "stream_chat",
     ) -> None:
         # WS early-audio incremental TTS path (sentence-buffered, post-LLM streaming)
         first_partial_logged = False
@@ -398,7 +399,7 @@ async def interaction_ws(websocket: WebSocket):
 
                 tts_task = asyncio.create_task(tts_worker())
 
-            async for chunk in stream_chat_reply(prompt_text):
+            async for chunk in stream_chat_reply(prompt_text, task_type=task_type):
                 if turn_token != current_turn_token:
                     return
                 if chunk:
@@ -566,7 +567,13 @@ async def interaction_ws(websocket: WebSocket):
                         turn_tokens.pop(active_turn_id, None)
                         continue
                     sequence_task = asyncio.create_task(
-                        stream_llm_sequence(turn_token, active_turn_id, prompt_text, "text_path")
+                        stream_llm_sequence(
+                            turn_token,
+                            active_turn_id,
+                            prompt_text,
+                            "text_path",
+                            task_type="stream_chat_text",
+                        )
                     )
                 continue
 
@@ -719,6 +726,7 @@ async def interaction_ws(websocket: WebSocket):
                             asr_result.get("source", "asr_fallback"),
                             enable_tts=True,
                             tts_emotion=asr_result.get("emotion", "neutral"),
+                            task_type="stream_chat_voice",
                         )
                     )
                 elif asr_result.get("status") not in ("empty", None):
@@ -837,7 +845,10 @@ async def chat_stream(request: ChatRequest):
             return
 
         try:
-            async for chunk in stream_chat_reply(request.message):
+            async for chunk in stream_chat_reply(
+                request.message,
+                task_type="stream_chat_text",
+            ):
                 if not chunk:
                     continue
                 if first_chunk_at is None:

@@ -135,11 +135,12 @@ async def process_user_intent(user_text: str, user_emotion: Optional[str] = None
 async def stream_chat_reply(
     user_text: str,
     history: Optional[List[Dict[str, str]]] = None,
+    task_type: str = "stream_chat",
 ) -> AsyncIterator[str]:
     """Stream chat reply chunks for SSE test path."""
     text = (user_text or "").strip()
     if not text:
         return
-    for chunk in dashscope_service.stream_chat(text, history):
+    for chunk in dashscope_service.stream_chat(text, history, task_type=task_type):
         if chunk:
             yield chunk

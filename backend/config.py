@@ -28,6 +28,15 @@ class Settings(BaseModel):
     # 模型配置
     QWEN_VL_MODEL: str = os.getenv("QWEN_VL_MODEL", "qwen-vl-plus")
     QWEN_MAX_MODEL: str = os.getenv("QWEN_MAX_MODEL", "qwen-max")
+    QWEN_LIGHT_MODEL: str = os.getenv("QWEN_LIGHT_MODEL", "qwen-plus")
+    QWEN_USE_ROUTING: bool = os.getenv("QWEN_USE_ROUTING", "true").lower() == "true"
+    QWEN_TEXT_CHAT_USE_LIGHT: bool = (
+        os.getenv("QWEN_TEXT_CHAT_USE_LIGHT", "true").lower() == "true"
+    )
+    QWEN_TEXT_CHAT_MODEL: str = os.getenv("QWEN_TEXT_CHAT_MODEL", "qwen-flash")
+    QWEN_TEXT_CHAT_USE_FLASH: bool = (
+        os.getenv("QWEN_TEXT_CHAT_USE_FLASH", "true").lower() == "true"
+    )
     COSYVOICE_MODEL: str = os.getenv("COSYVOICE_MODEL", "iic/CosyVoice-300M-SFT")
     SENSEVOICE_MODEL: str = os.getenv("SENSEVOICE_MODEL", "sensevoice-v1")
     SENSEVOICE_SAMPLE_RATE: int = int(os.getenv("SENSEVOICE_SAMPLE_RATE", "16000"))

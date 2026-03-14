@@ -14,23 +14,60 @@ from config import settings
 class DashScopeService:
     """DashScope Qwen-Max 服务"""
 
+    _LIGHT_TASKS = {"classify_intent", "summarize_breakdown"}
+    _TEXT_STREAM_TASKS = {"stream_chat_text"}
+
     def __init__(self):
         self.api_key = settings.DASHSCOPE_API_KEY
         self.model = settings.QWEN_MAX_MODEL
+        self.light_model = settings.QWEN_LIGHT_MODEL
+        self.text_chat_model = settings.QWEN_TEXT_CHAT_MODEL
+
+    def _log_route(self, task_type: str, model: str, routing_enabled: bool) -> None:
+        if routing_enabled:
+            print(f"[QwenRoute] task={task_type} model={model}")
+        else:
+            print(f"[QwenRoute] routing=off task={task_type} model={model}")
+
+    def choose_model(self, task_type: Optional[str]) -> str:
+        if not task_type:
+            return self.model
+
+        if not settings.QWEN_USE_ROUTING:
+            model = self.model
+            self._log_route(task_type, model, routing_enabled=False)
+            return model
+
+        if task_type in self._TEXT_STREAM_TASKS:
+            if settings.QWEN_TEXT_CHAT_USE_FLASH:
+                model = self.text_chat_model
+            else:
+                model = self.light_model
+                print("[QwenRoute] text_flash=off fallback=light")
+        elif task_type == "stream_chat_voice":
+            model = self.model
+        elif task_type in self._LIGHT_TASKS:
+            model = self.light_model
+        else:
+            model = self.model
+        self._log_route(task_type, model, routing_enabled=True)
+        return model
 
     def _call_qwen(
         self,
         messages: List[dict],
         max_tokens: int = 1024,
         temperature: float = 0.7,
+        task_type: Optional[str] = None,
     ) -> Optional[str]:
         """同步调用 Qwen-Max API"""
         if not self.api_key or self.api_key == "your_dashscope_api_key_here":
             return None
 
         try:
+            model = self.choose_model(task_type)
             response: GenerationResponse = Generation.call(
-                model=self.model,
+                model=model,
                 api_key=self.api_key,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -162,7 +199,12 @@ class DashScopeService:
             {"role": "user", "content": text},
         ]
 
-        response = self._call_qwen(messages, max_tokens=30, temperature=0.1)
+        response = self._call_qwen(
+            messages,
+            max_tokens=30,
+            temperature=0.1,
+            task_type="classify_intent",
+        )
         if response:
             try:
                 data = json.loads(response)
@@ -226,7 +268,12 @@ class DashScopeService:
             {"role": "user", "content": user_prompt},
         ]
 
-        response = self._call_qwen(messages, max_tokens=60, temperature=0.6)
+        response = self._call_qwen(
+            messages,
+            max_tokens=60,
+            temperature=0.6,
+            task_type="summarize_breakdown",
+        )
         if response:
             return response.strip()
 
@@ -276,6 +323,7 @@ class DashScopeService:
         self,
         message: str,
         history: Optional[List[Dict[str, str]]] = None,
+        task_type: Optional[str] = None,
     ) -> Dict[str, str]:
         """
         Chat Agent - 伙伴闲聊
@@ -323,9 +371,10 @@ class DashScopeService:
 
             return ""
 
+        model = self.choose_model(task_type)
         try:
             response = Generation.call(
-                model=self.model,
+                model=model,
                 api_key=self.api_key,
                 messages=messages,
                 max_tokens=150,
@@ -358,6 +407,15 @@ class DashScopeService:
             if fallback:
                 yield fallback
 
+    def stream_chat(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        task_type: str = "stream_chat",
+    ) -> Iterator[str]:
+        """Stream chat reply chunks for SSE test path."""
+        yield from self.chat(message, history, task_type=task_type)
+
     def generate_reply_from_asr(self, user_text: str, user_emotion: str) -> str:
         """
         Generate a short reply for the voice pipeline.
@@ -379,7 +437,12 @@ class DashScopeService:
             {"role": "user", "content": user_prompt},
         ]
 
-        response = self._call_qwen(messages, max_tokens=120, temperature=0.7)
+        response = self._call_qwen(
+            messages,
+            max_tokens=120,
+            temperature=0.7,
+            task_type="generate_reply_from_asr",
+        )
         if response:
             return response.strip()
 

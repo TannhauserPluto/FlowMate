@@ -278,6 +278,10 @@ const MiniApp: React.FC = () => {
   const [memoDoneIds, setMemoDoneIds] = useState<Set<string>>(() => new Set());
   const [activePanel, setActivePanel] = useState<MiniPanel>('todo');
   const todoStorageRef = useRef(initialTodoState ? serializeTodoState(initialTodoState) : '');
+  const lastMemoKeyRef = useRef<string | null>(null);
+  const memoUpdateSeenRef = useRef(false);
+  const lastTodoKeyRef = useRef<string | null>(null);
+  const todoUpdateSeenRef = useRef(false);
   const memoItems = useMemo<MemoListItem[]>(
     () => memos.map((memo) => ({ ...memo, id: `${memo.created_at}-${memo.content}` })),
     [memos],
@@ -516,6 +520,20 @@ const MiniApp: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    const lastMemo = memos[memos.length - 1];
+    const nextKey = lastMemo ? `${lastMemo.created_at}-${lastMemo.content}` : null;
+    if (!memoUpdateSeenRef.current) {
+      memoUpdateSeenRef.current = true;
+      lastMemoKeyRef.current = nextKey;
+      return;
+    }
+    if (nextKey && nextKey !== lastMemoKeyRef.current) {
+      setActivePanel('memo');
+    }
+    lastMemoKeyRef.current = nextKey;
+  }, [memos]);
+
+  useEffect(() => {
     const nextState: StoredTodoState = {
       taskTitle,
       taskDate,
@@ -526,6 +544,24 @@ const MiniApp: React.FC = () => {
     if (serialized === todoStorageRef.current) return;
     todoStorageRef.current = serialized;
     writeTodoState(nextState);
+  }, [taskTitle, taskDate, todoItems, doneItems]);
+
+  useEffect(() => {
+    const nextKey = serializeTodoState({
+      taskTitle,
+      taskDate,
+      todoItems,
+      doneItems,
+    });
+    if (!todoUpdateSeenRef.current) {
+      todoUpdateSeenRef.current = true;
+      lastTodoKeyRef.current = nextKey;
+      return;
+    }
+    if (nextKey !== lastTodoKeyRef.current) {
+      setActivePanel('todo');
+    }
+    lastTodoKeyRef.current = nextKey;
   }, [taskTitle, taskDate, todoItems, doneItems]);
 
   const markDone = (id: string) => {
