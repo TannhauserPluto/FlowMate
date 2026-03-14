@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .dashscope_service import dashscope_service
 
-FLASH_KEYWORD = "捕捉闪念"
+FLASH_KEYWORD = "闪念"
 
 ResponseType = Literal["command", "chat", "breakdown"]
 
@@ -62,7 +62,7 @@ def _build_title(text: str, max_len: int = 32) -> str:
 async def process_user_intent(user_text: str, user_emotion: Optional[str] = None) -> Dict:
     """
     Process user ASR text with three-layer routing:
-    1) Flash capture by keyword "捕捉闪念"
+    1) Flash capture by keyword
     2) Intent routing (LLM)
     3) Multi-modal response construction
     """
@@ -72,9 +72,14 @@ async def process_user_intent(user_text: str, user_emotion: Optional[str] = None
     # Layer 1: flash capture (no backend storage)
     if FLASH_KEYWORD in text:
         content = text.replace(FLASH_KEYWORD, "", 1).strip()
+        content = content.lstrip("，。,:：")
+        if not content:
+            content = text
+        summary = await _run_sync(dashscope_service.summarize_memo, content)
+        memo_text = (summary or content).strip()
         payload = CommandPayload(
             command="save_memo",
-            content=content,
+            content=memo_text,
             display_text="已记录闪念",
         )
         response = InteractionResponse(

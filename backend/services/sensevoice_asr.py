@@ -5,6 +5,7 @@ Recorded file recognition via OSS + DashScope Transcription
 
 import asyncio
 import os
+import re
 import traceback
 from typing import Dict, Optional
 
@@ -107,7 +108,7 @@ class SenseVoiceService:
             }
 
         try:
-            text = self._extract_text(response)
+            text = self._sanitize_text(self._extract_text(response))
             emotion = self._extract_emotion(response)
             if text:
                 return {
@@ -220,6 +221,13 @@ class SenseVoiceService:
                     return first.get("text") or first.get("transcript") or ""
 
         return ""
+
+    def _sanitize_text(self, text: str) -> str:
+        if not text:
+            return ""
+        # Remove ASR control tokens like <|Speech|> or <|/Speech|>.
+        cleaned = re.sub(r"<\|.*?\|>", "", text)
+        return cleaned.strip()
 
     def _extract_emotion(self, response) -> str:
         payload = self._resolve_transcription_payload(response)

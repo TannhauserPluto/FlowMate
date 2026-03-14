@@ -238,6 +238,30 @@ class DashScopeService:
 
         return f"这确实有点难，我们先从“{steps[0]}”开始吧。"
 
+    def summarize_memo(self, text: str) -> str:
+        """Summarize a flash memo into a short todo/reminder phrase."""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+
+        system_prompt = (
+            "你是一个任务提醒助手。"
+            "请把用户的闪念总结成一条简短、可执行的待办/提醒。"
+            "要求：输出一句话，不超过15字，不要前后引号，不要列表，不要解释。"
+        )
+        user_prompt = f"用户闪念：{cleaned}\n请输出总结后的待办。"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = self._call_qwen(messages, max_tokens=40, temperature=0.4)
+        if response:
+            return response.strip().strip('"“”')
+
+        return ""
+
     def chat(
         self,
         message: str,

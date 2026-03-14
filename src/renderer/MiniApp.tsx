@@ -14,6 +14,7 @@ import {
 } from './lib/storage';
 
 type MiniPanel = 'todo' | 'memo';
+type MemoListItem = MemoItem & { id: string };
 type Bounds = { x: number; y: number; width: number; height: number };
 type ResizeState = {
   handle: string;
@@ -185,14 +186,20 @@ const MiniTodoCard = ({
 
 const MiniMemoCard = ({
   date,
-  memos,
+  todoMemos,
+  doneMemos,
   isActive,
   onActivate,
+  onMarkDone,
+  onRestore,
 }: {
   date: string;
-  memos: MemoItem[];
+  todoMemos: MemoListItem[];
+  doneMemos: MemoListItem[];
   isActive: boolean;
   onActivate: () => void;
+  onMarkDone: (id: string) => void;
+  onRestore: (id: string) => void;
 }) => (
   <div
     className={`mini-card ${isActive ? 'is-front' : 'is-back'}`}
@@ -213,12 +220,21 @@ const MiniMemoCard = ({
     </div>
     <div className="todo-title-row">TO DO</div>
     <ul className="todo-list todo-list--todo">
-      {memos.length ? (
-        memos.map((memo, index) => (
-          <li key={`${memo.created_at}-${index}`} className="todo-item">
-            <span className="todo-check todo-check--static" aria-hidden="true">
+      {todoMemos.length ? (
+        todoMemos.map((memo) => (
+          <li key={memo.id} className="todo-item">
+            <button
+              className="todo-check"
+              type="button"
+              aria-label="Mark done"
+              onClick={(event) => {
+                event.stopPropagation();
+                onMarkDone(memo.id);
+              }}
+              disabled={!isActive}
+            >
               <span className="todo-check-circle" />
-            </span>
+            </button>
             <span className="todo-text">{memo.content}</span>
           </li>
         ))
@@ -228,7 +244,25 @@ const MiniMemoCard = ({
     </ul>
     <div className="todo-divider" />
     <div className="todo-title-row todo-title-done">DONE</div>
-    <ul className="todo-list todo-list--done" aria-hidden="true" />
+    <ul className="todo-list todo-list--done">
+      {doneMemos.map((memo) => (
+        <li key={memo.id} className="todo-item is-done">
+          <button
+            className="todo-check"
+            type="button"
+            aria-label="Restore"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRestore(memo.id);
+            }}
+            disabled={!isActive}
+          >
+            <span className="todo-check-circle" />
+          </button>
+          <span className="todo-text">{memo.content}</span>
+        </li>
+      ))}
+    </ul>
   </div>
 );
 
@@ -249,9 +283,22 @@ const MiniApp: React.FC = () => {
     () => initialTodoState?.todoItems ?? buildDefaultTodos(),
   );
   const [doneItems, setDoneItems] = useState<TodoEntry[]>(() => initialTodoState?.doneItems ?? []);
-  const [memos, setMemos] = useState<MemoItem[]>(() => readMemos());
+  const [memos, setMemos] = useState<MemoItem[]>(() => readMemos().slice(-3));
+  const [memoDoneIds, setMemoDoneIds] = useState<Set<string>>(() => new Set());
   const [activePanel, setActivePanel] = useState<MiniPanel>('todo');
   const todoStorageRef = useRef(initialTodoState ? serializeTodoState(initialTodoState) : '');
+  const memoItems = useMemo<MemoListItem[]>(
+    () => memos.map((memo) => ({ ...memo, id: `${memo.created_at}-${memo.content}` })),
+    [memos],
+  );
+  const memoTodoItems = useMemo(
+    () => memoItems.filter((memo) => !memoDoneIds.has(memo.id)),
+    [memoDoneIds, memoItems],
+  );
+  const memoDoneItems = useMemo(
+    () => memoItems.filter((memo) => memoDoneIds.has(memo.id)),
+    [memoDoneIds, memoItems],
+  );
 
   useEffect(() => {
     document.body.classList.add('mini-mode');
@@ -443,11 +490,38 @@ const MiniApp: React.FC = () => {
         setDoneItems(next.doneItems);
       }
       if (event.key === MEMO_STORAGE_KEY) {
-        setMemos(parseMemos(event.newValue));
+        setMemos(parseMemos(event.newValue).slice(-3));
       }
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    const currentIds = new Set(memoItems.map((memo) => memo.id));
+    setMemoDoneIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (currentIds.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, [memoItems]);
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel('flowmate:memos');
+    const handleMessage = (event: MessageEvent) => {
+      const payload = event.data as { type?: string; memos?: MemoItem[] };
+      if (payload?.type !== 'memo_update') return;
+      const next = parseMemos(JSON.stringify(payload.memos ?? []));
+      setMemos(next.slice(-3));
+    };
+    channel.addEventListener('message', handleMessage);
+    return () => {
+      channel.removeEventListener('message', handleMessage);
+      channel.close();
+    };
   }, []);
 
   useEffect(() => {
@@ -478,6 +552,18 @@ const MiniApp: React.FC = () => {
       if (!item) return prev;
       setTodoItems((prevTodo) => [...prevTodo.filter((todo) => todo.id !== id), item]);
       return prev.filter((todo) => todo.id !== id);
+    });
+  };
+
+  const markMemoDone = (id: string) => {
+    setMemoDoneIds((prev) => new Set([...prev, id]));
+  };
+
+  const restoreMemo = (id: string) => {
+    setMemoDoneIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
     });
   };
 
@@ -516,9 +602,12 @@ const MiniApp: React.FC = () => {
             />
             <MiniMemoCard
               date={taskDate}
-              memos={memos}
+              todoMemos={memoTodoItems}
+              doneMemos={memoDoneItems}
               isActive={activePanel === 'memo'}
               onActivate={() => setActivePanel('memo')}
+              onMarkDone={markMemoDone}
+              onRestore={restoreMemo}
             />
           </div>
         </div>

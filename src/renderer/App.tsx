@@ -25,6 +25,7 @@ import {
   parseTodoState,
   readTodoState,
   serializeTodoState,
+  MEMO_STORAGE_KEY,
   TODO_STORAGE_KEY,
   writeTodoState,
   type StoredTodoState,
@@ -184,6 +185,7 @@ const wrapTextByWidth = (text: string) => {
     .flatMap((line) => wrapLineByWidth(line, maxTextWidth, ctx))
     .join('\n');
 };
+const MEMO_BROADCAST_CHANNEL = 'flowmate:memos';
 const safeJsonParse = <T,>(raw: string | null, fallback: T): T => {
   if (!raw) return fallback;
   try {
@@ -372,6 +374,19 @@ const App: React.FC = () => {
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.removeItem(MEMO_STORAGE_KEY);
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel(MEMO_BROADCAST_CHANNEL);
+        channel.postMessage({ type: 'memo_update', memos: [] });
+        channel.close();
+      }
+    } catch {
+      // ignore memo reset failures
+    }
   }, []);
 
   useEffect(() => {
@@ -1124,16 +1139,27 @@ const App: React.FC = () => {
 
     if (interaction.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
       try {
-        const key = 'flowmate.memos';
         const prev = safeJsonParse(
-          window.localStorage.getItem(key),
+          window.localStorage.getItem(MEMO_STORAGE_KEY),
           [] as Array<{ content: string; created_at: string }>,
         );
-        prev.push({
-          content: interaction.ui_payload.content,
-          created_at: new Date().toISOString(),
-        });
-        window.localStorage.setItem(key, JSON.stringify(prev));
+        const next = [
+          ...prev,
+          {
+            content: interaction.ui_payload.content,
+            created_at: new Date().toISOString(),
+          },
+        ].slice(-3);
+        window.localStorage.setItem(MEMO_STORAGE_KEY, JSON.stringify(next));
+        try {
+          if (typeof BroadcastChannel !== 'undefined') {
+            const channel = new BroadcastChannel(MEMO_BROADCAST_CHANNEL);
+            channel.postMessage({ type: 'memo_update', memos: next });
+            channel.close();
+          }
+        } catch {
+          // ignore broadcast failures
+        }
       } catch {
         // ignore storage failures
       }
@@ -1321,28 +1347,28 @@ const App: React.FC = () => {
               try {
                 const snippet = String(interaction.audio_text ?? '').replace(/\s+/g, ' ').slice(0, 80);
                 const source = 'task_breakdown';
-                if (isWsAudioActive()) {
-                  console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
-                  return;
+                  if (isWsAudioActive()) {
+                    console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
+                  } else {
+                    console.log('[speak_api] request', { source, text: snippet });
+                    const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
+                    });
+                    if (speakResponse.ok) {
+                      const payload = await speakResponse.json();
+                      playAudioFromBase64(
+                        payload?.data?.audio?.base64,
+                        payload?.data?.audio?.format,
+                        `speak_api:${source}`,
+                        snippet,
+                      );
+                    }
+                  }
+                } catch {
+                  // ignore speak errors
                 }
-                console.log('[speak_api] request', { source, text: snippet });
-                const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
-                });
-                if (speakResponse.ok) {
-                  const payload = await speakResponse.json();
-                  playAudioFromBase64(
-                    payload?.data?.audio?.base64,
-                    payload?.data?.audio?.format,
-                    `speak_api:${source}`,
-                    snippet,
-                  );
-                }
-              } catch {
-                // ignore speak errors
-              }
           }
           await generateTasks(cleaned, shouldArchive);
           return;
@@ -1811,6 +1837,8 @@ const App: React.FC = () => {
       let thinkingStarted = false;
       let recorderStarted = false;
       let allowEnd = true;
+      let intentCheckInFlight = false;
+      let skipWsChat = false;
     const watchdogMs = 30000;
     const clearWatchdog = () => {
       if (wsAudioStateRef.current.watchdogTimer) {
@@ -1842,21 +1870,38 @@ const App: React.FC = () => {
         }
       }, watchdogMs);
     };
-    const startThinkingOnce = () => {
-      if (!useUi || thinkingStarted) return;
-      thinkingStarted = true;
-      beginThinking();
-    };
-    const endThinkingOnce = () => {
+      const startThinkingOnce = () => {
+        if (!useUi || thinkingStarted) return;
+        thinkingStarted = true;
+        beginThinking();
+      };
+      const endThinkingOnce = () => {
       if (!useUi || !thinkingStarted) return;
       thinkingStarted = false;
-      endThinking();
-    };
-    if (useUi) {
-      setChatAssistantText('');
-      if (isHomeView) {
-        setHomeChatBubble('');
-      }
+        endThinking();
+      };
+      const suppressWsChatForBreakdown = (reason: string) => {
+        skipWsChat = true;
+        console.log('[ws-audio] ws_chat_skipped_for_breakdown', { reason });
+        endThinkingOnce();
+        if (audioQueue.size > 0) {
+          audioQueue.clear();
+        }
+        if (audioPlayer) {
+          audioPlayer.pause();
+          audioPlayer.currentTime = 0;
+          audioPlayer.src = '';
+        }
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'cancel_turn', turn_id: turnId }));
+          socket.close(1000, 'breakdown');
+        }
+      };
+      if (useUi) {
+        setChatAssistantText('');
+        if (isHomeView) {
+          setHomeChatBubble('');
+        }
     }
 
     const runId = wsAudioStateRef.current.id + 1;
@@ -2055,22 +2100,57 @@ const App: React.FC = () => {
         return;
       }
       console.log('[ws-audio] message', payload);
-      if (payload?.type === 'partial_asr') {
-        if (!firstPartialLogged) {
-          firstPartialLogged = true;
-          console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
+        if (payload?.type === 'partial_asr') {
+          if (!firstPartialLogged) {
+            firstPartialLogged = true;
+            console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
+          }
+          console.log('[ws-audio] partial_asr', payload.text);
+          if (useUi && payload?.text) {
+            setChatUserText(payload.text);
+          }
+          const asrText = String(payload?.text ?? '').trim();
+          const isFinal = payload?.phase === 'final';
+          if (
+            useUi &&
+            isHomeView &&
+            isFinal &&
+            asrText &&
+            !intentCheckInFlight &&
+            !skipWsChat
+          ) {
+            intentCheckInFlight = true;
+            const snippet = asrText.replace(/\s+/g, ' ').slice(0, 80);
+            console.log('[ws-audio] intent_check_start', { text: snippet });
+            void (async () => {
+              try {
+                const interaction = await requestIntent(asrText);
+                const intent = interaction?.type ?? 'unknown';
+                console.log('[ws-audio] intent_check_result', { intent });
+                if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
+                  console.log('[ws-audio] memo_saved');
+                  await applyInteraction(interaction, asrText);
+                }
+                if (interaction?.type === 'breakdown') {
+                  console.log('[ws-audio] breakdown_triggered');
+                  await applyInteraction(interaction, asrText);
+                  suppressWsChatForBreakdown('intent_breakdown');
+                }
+              } catch (error) {
+                console.warn('[ws-audio] intent_check_failed', error);
+              } finally {
+                intentCheckInFlight = false;
+              }
+            })();
+          }
         }
-        console.log('[ws-audio] partial_asr', payload.text);
-        if (useUi && payload?.text) {
-          setChatUserText(payload.text);
-        }
-      }
-      if (payload?.type === 'partial_text') {
-        if (!firstPartialTextLogged) {
-          firstPartialTextLogged = true;
-          console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
-        }
-        const fragment = String(payload.text ?? '');
+        if (payload?.type === 'partial_text') {
+          if (skipWsChat) return;
+          if (!firstPartialTextLogged) {
+            firstPartialTextLogged = true;
+            console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
+          }
+          const fragment = String(payload.text ?? '');
         assistantBuffer += fragment;
         console.log('[ws-audio] partial_text', fragment);
         if (useUi) {
@@ -2081,6 +2161,7 @@ const App: React.FC = () => {
         }
       }
         if (payload?.type === 'audio_chunk') {
+          if (skipWsChat) return;
           const seq = typeof payload.seq === 'number' ? payload.seq : null;
           if (seq === null) {
             console.warn('[ws-audio] audio_chunk missing seq');
@@ -2158,11 +2239,11 @@ const App: React.FC = () => {
 
         playNext();
       }
-      if (payload?.type === 'done') {
-        if (!doneLogged) {
-          doneLogged = true;
-          console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
-        }
+        if (payload?.type === 'done') {
+          if (!doneLogged) {
+            doneLogged = true;
+            console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
+          }
         clearWatchdog();
         if (audioQueue.size > 0) {
           const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
