@@ -1164,6 +1164,17 @@ const App: React.FC = () => {
   const handleFocusUserText = async (text: string) => {
     const cleaned = sanitizeText(text);
     if (!cleaned) return;
+    if (cleaned.includes('闪念')) {
+      try {
+        const interaction = await requestIntent(cleaned);
+        if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
+          await applyInteraction(interaction, cleaned);
+          return;
+        }
+      } catch {
+        // ignore memo intent errors
+      }
+    }
     if (!focusSessionId) {
       await startFocusSession(cleaned);
       return;
@@ -1493,6 +1504,8 @@ const App: React.FC = () => {
       );
       if (confirmText && isHomeView) {
         setHomeChatBubble(wrapTextByWidth(confirmText));
+      } else if (confirmText && isTimerView) {
+        setSpeechBubble(confirmText);
       }
       return;
     }
@@ -1827,6 +1840,11 @@ const App: React.FC = () => {
       }
       console.log('[voice-focus] request_ms', Math.round(performance.now() - requestStart));
       const userText = sanitizeText(payload?.data?.user?.text || '');
+      const interaction = payload?.data?.interaction;
+      if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
+        await applyInteraction(interaction, userText);
+        return;
+      }
       await handleFocusUserText(userText);
     } finally {
       endThinking();
