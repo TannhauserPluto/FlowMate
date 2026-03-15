@@ -848,10 +848,14 @@ const App: React.FC = () => {
     }
   };
 
-  const speakText = async (text: string, source = 'other') => {
+  const speakText = async (
+    text: string,
+    source = 'other',
+    options?: { allowDuringWs?: boolean },
+  ) => {
     if (!text) return;
     const snippet = text.replace(/\s+/g, ' ').slice(0, 80);
-    if (isWsAudioActive()) {
+    if (isWsAudioActive() && !options?.allowDuringWs) {
       console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
       return;
     }
@@ -3312,8 +3316,9 @@ const App: React.FC = () => {
       return;
     }
     const fact = BREAK_FACTS[Math.floor(Math.random() * BREAK_FACTS.length)];
+    console.log('[break] fact_ready', { fact });
     setBreakPhase('rest_fact_speaking');
-    void speakText(fact, 'break_fact');
+    void speakText(fact, 'break_fact', { allowDuringWs: true });
   }, [currentView, breakStretchPlayed, breakPhase, BREAK_FACTS.length]);
   const isAvatarSpeaking = avatarSpeechState === 'speaking';
   const isAvatarHold = avatarSpeechState === 'speaking_hold';
@@ -3332,6 +3337,7 @@ const App: React.FC = () => {
     if (!video) return;
     const handleEnded = () => {
       if (video.dataset.state === 'stretch') {
+        console.log('[break] stretch_ended');
         setBreakStretchPlayed(true);
       }
     };
