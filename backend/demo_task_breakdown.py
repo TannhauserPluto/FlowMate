@@ -15,13 +15,13 @@ class DemoTaskBreakdown:
 
 DIGITAL_MEDIA_PAPER_DEMO = DemoTaskBreakdown(
     trigger="数字媒体论文",
-    title="数字媒体论文",
+    title="数媒起稿",
     steps=(
-        "新建论文文档",
-        "列出章节大纲",
-        "写摘要初稿",
+        "搜索一个相关论文",
+        "记录相关灵感",
+        "列三节提纲",
     ),
-    summary="演示模式下，我先帮你固定拆成三步：新建论文文档、列出章节大纲、写摘要初稿。",
+    summary="放轻松，我们先找到一篇相关论文就行，后面两步会顺很多。",
 )
 
 

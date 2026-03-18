@@ -1,4 +1,4 @@
-"""
+﻿"""
 FlowMate-Echo Interaction API
 Interaction-related routes
 """
@@ -14,6 +14,7 @@ import random
 import time
 import json
 import asyncio
+import re
 
 try:
     from zoneinfo import ZoneInfo
@@ -26,10 +27,56 @@ from demo_task_breakdown import (
     get_demo_task_breakdown,
 )
 from services import audio_service, voice_pipeline_service
-from services.interaction_service import process_user_intent, stream_chat_reply, stream_focus_reply
+from services.interaction_service import (
+    process_user_intent,
+    stream_breakdown_reply,
+    stream_chat_reply,
+    stream_focus_reply,
+)
 from services.streaming_asr_adapter import StreamingAsrAdapter
 
 router = APIRouter()
+
+VOICE_TRANSCRIPT_FILLER_RE = re.compile(
+    r"^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧|好的|好啊|好呀|好呢|嗯嗯|啊啊|哦哦|诶诶|欸欸|哎呀)+$"
+)
+VOICE_TRANSCRIPT_PUNCTUATION_RE = re.compile(r"[\s，。！？、,.!?;；:：'\"“”‘’（）()【】\[\]<>《》]+")
+VOICE_STREAM_SPLIT_PUNCTUATION = set("。！？!?")
+
+
+def _normalize_guard_text(text: Optional[str]) -> str:
+    return " ".join(str(text or "").split()).strip()
+
+
+def _compact_guard_text(text: Optional[str]) -> str:
+    cleaned = _normalize_guard_text(text)
+    return VOICE_TRANSCRIPT_PUNCTUATION_RE.sub("", cleaned)
+
+
+def _assess_voice_transcript(text: Optional[str]) -> Dict[str, Any]:
+    cleaned = _normalize_guard_text(text)
+    compact = _compact_guard_text(text)
+    if not cleaned:
+        return {"usable": False, "reason": "empty", "cleaned": cleaned, "normalized": compact}
+    if not compact:
+        return {"usable": False, "reason": "punctuation_only", "cleaned": cleaned, "normalized": compact}
+    if len(compact) < 2:
+        return {"usable": False, "reason": "too_short", "cleaned": cleaned, "normalized": compact}
+    if VOICE_TRANSCRIPT_FILLER_RE.fullmatch(compact):
+        return {"usable": False, "reason": "filler_only", "cleaned": cleaned, "normalized": compact}
+    return {"usable": True, "reason": "ok", "cleaned": cleaned, "normalized": compact}
+
+
+def _assess_task_description(text: Optional[str]) -> Dict[str, Any]:
+    cleaned = _normalize_guard_text(text)
+    compact = _compact_guard_text(text)
+    if not cleaned:
+        return {"usable": False, "reason": "empty", "cleaned": cleaned, "normalized": compact}
+    if not compact:
+        return {"usable": False, "reason": "punctuation_only", "cleaned": cleaned, "normalized": compact}
+    if len(compact) < 2:
+        return {"usable": False, "reason": "too_short", "cleaned": cleaned, "normalized": compact}
+    return {"usable": True, "reason": "ok", "cleaned": cleaned, "normalized": compact}
 
 def _sse_event(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=True)}\n\n"
@@ -105,18 +152,52 @@ class IntentRequest(BaseModel):
 @router.post("/generate-tasks", response_model=TaskGenerationResponse)
 async def generate_tasks(request: TaskGenerationRequest):
     """Generate task breakdown."""
+    task_description = _normalize_guard_text(request.task_description)
+    print(f"[GenerateTasks] input_task={task_description[:120]}")
+    task_check = _assess_task_description(task_description)
+    if not task_check["usable"]:
+        print(
+            f"[GenerateTasks] invalid_task_rejected reason={task_check['reason']} "
+            f"input_task={task_description[:120]}"
+        )
+        print("[GenerateTasks] returning_controlled_error status=422")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_task_description",
+                "message": "task_description must be a meaningful non-empty string",
+                "reason": task_check["reason"],
+            },
+        )
     try:
-        if get_demo_task_breakdown(request.task_description):
+        if get_demo_task_breakdown(task_description):
             await asyncio.sleep(DEMO_TASK_BREAKDOWN_DELAY_SECONDS)
-        tasks = await agent_brain.generate_task_breakdown(request.task_description)
-        topic = await agent_brain.generate_task_topic(request.task_description, tasks)
+        tasks = await agent_brain.generate_task_breakdown(task_description)
+        topic = await agent_brain.generate_task_topic(task_description, tasks)
         return TaskGenerationResponse(
             tasks=tasks,
-            original_description=request.task_description,
+            original_description=task_description,
             topic=topic or None,
         )
+    except ValueError as e:
+        print(f"[GenerateTasks] returning_controlled_error status=422 error={e}")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_task_description",
+                "message": "task_description must be a meaningful non-empty string",
+                "reason": str(e),
+            },
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[GenerateTasks] returning_controlled_error status=503 error={e}")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "task_generation_unavailable",
+                "message": "task breakdown unavailable, please retry",
+            },
+        )
 
 
 @router.post("/get-response", response_model=AIResponseResult)
@@ -197,7 +278,7 @@ async def speak(request: SpeakRequest):
 
 
 def _split_text_into_sentences(text: str, max_len: int = 80) -> List[str]:
-    punctuation = set("。！？!?")
+    punctuation = VOICE_STREAM_SPLIT_PUNCTUATION
     cleaned = (text or "").strip()
     if not cleaned:
         return []
@@ -307,7 +388,7 @@ async def interaction_ws(websocket: WebSocket):
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized_text = (transcript or "").strip()
-        if any(keyword in normalized_text for keyword in ("闪念", "闪电")):
+        if any(keyword in normalized_text for keyword in ("闪念", "闪电", "提醒")):
             interaction = await process_user_intent(normalized_text, emotion)
             if (
                 interaction
@@ -384,13 +465,16 @@ async def interaction_ws(websocket: WebSocket):
         task_type: str = "stream_chat",
         chunk_stream: Optional[AsyncIterator[str]] = None,
         on_complete_text: Optional[Callable[[str], Any]] = None,
+        after_stream: Optional[Callable[[str], Any]] = None,
+        text_source: str = "llm",
+        done_reason: Optional[str] = None,
     ) -> None:
         # WS early-audio incremental TTS path (sentence-buffered, post-LLM streaming)
         first_partial_logged = False
         start = time.perf_counter()
         has_any_text = False
         sentence_buffer = ""
-        punctuation = set("。！？!?")
+        punctuation = VOICE_STREAM_SPLIT_PUNCTUATION
         tts_queue: Optional[asyncio.Queue] = None
         tts_task: Optional[asyncio.Task] = None
         tts_failed = False
@@ -510,7 +594,7 @@ async def interaction_ws(websocket: WebSocket):
                         "turn_id": turn_id,
                         "text": chunk,
                         "mock": False,
-                        "source": "llm",
+                        "source": text_source,
                     })
                     if enable_tts and tts_queue is not None:
                         sentence_buffer += chunk
@@ -572,11 +656,18 @@ async def interaction_ws(websocket: WebSocket):
                 maybe_result = on_complete_text(completed_text)
                 if asyncio.iscoroutine(maybe_result):
                     await maybe_result
+            if after_stream is not None:
+                maybe_result = after_stream(completed_text)
+                if asyncio.iscoroutine(maybe_result):
+                    await maybe_result
 
-            await send({
+            done_payload = {
                 "type": "done",
                 "turn_id": turn_id,
-            })
+            }
+            if done_reason:
+                done_payload["reason"] = done_reason
+            await send(done_payload)
             print(
                 "[ws] ws_turn_done_ms="
                 f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
@@ -900,12 +991,49 @@ async def interaction_ws(websocket: WebSocket):
                         })
                     page = (turn_pages.get(turn_id) or "home").strip().lower()
                     transcript = (asr_result.get("text") or "").strip()
+                    transcript_source = asr_result.get("transcript_source") or asr_result.get("source", "unknown")
+                    if transcript_source == "stream_partial_fallback":
+                        print(f"[VoiceTranscript] fallback_to_partial_final={transcript[:120]} turn_id={turn_id}")
+                    else:
+                        print(
+                            f"[VoiceTranscript] final_from_complete={transcript[:120]} "
+                            f"turn_id={turn_id} source={transcript_source}"
+                        )
+                    transcript_check = _assess_voice_transcript(transcript)
+                    if page in ("home", "task") and not transcript_check["usable"]:
+                        print(
+                            f"[VoiceTranscript] final_invalid_skip_breakdown reason={transcript_check['reason']} "
+                            f"turn_id={turn_id} transcript={transcript[:120]} page={page}"
+                        )
+                        await send({
+                            "type": "error",
+                            "turn_id": turn_id,
+                            "message": "invalid_voice_transcript",
+                            "reason": transcript_check["reason"],
+                            "hint": "我刚刚没听清，我们再说一次就好。",
+                        })
+                        await send({
+                            "type": "done",
+                            "turn_id": turn_id,
+                            "reason": "invalid_voice_transcript",
+                        })
+                        print(
+                            f"[ws] ws_turn_cleanup turn_id={turn_id} "
+                            f"reason=invalid_voice_transcript page={page}"
+                        )
+                        audio_buffers.pop(turn_id, None)
+                        turn_modes.pop(turn_id, None)
+                        turn_tokens.pop(turn_id, None)
+                        turn_pages.pop(turn_id, None)
+                        turn_contexts.pop(turn_id, None)
+                        asr_adapter.close_session(turn_id, reason="invalid_voice_transcript")
+                        continue
                     if page in ("home", "task"):
                         interaction = await process_user_intent(
                             transcript,
                             asr_result.get("emotion", "neutral"),
                         )
-                        if interaction and interaction.get("type") in ("command", "breakdown"):
+                        if interaction and interaction.get("type") == "command":
                             await send({
                                 "type": "interaction",
                                 "turn_id": turn_id,
@@ -927,6 +1055,36 @@ async def interaction_ws(websocket: WebSocket):
                             turn_pages.pop(turn_id, None)
                             turn_contexts.pop(turn_id, None)
                             asr_adapter.close_session(turn_id, reason="interaction_done")
+                            continue
+                        if interaction and interaction.get("type") == "breakdown":
+                            await send({
+                                "type": "interaction",
+                                "turn_id": turn_id,
+                                "user_text": transcript,
+                                "interaction": interaction,
+                                "defer_apply": True,
+                                "stream_kind": "breakdown",
+                            })
+                            print(f"[VoiceBreakdownStream] intent=breakdown turn_id={turn_id} page={page}")
+                            if sequence_task:
+                                sequence_task.cancel()
+                            sequence_task = asyncio.create_task(
+                                stream_llm_sequence(
+                                    turn_token,
+                                    turn_id,
+                                    transcript,
+                                    "breakdown_voice",
+                                    enable_tts=True,
+                                    task_type="stream_breakdown_voice",
+                                    chunk_stream=stream_breakdown_reply(
+                                        transcript,
+                                        interaction,
+                                        task_type="stream_breakdown_voice",
+                                    ),
+                                    text_source="breakdown_stream",
+                                    done_reason="breakdown_stream",
+                                )
+                            )
                             continue
                     if page == "focus":
                         focus_turn = await build_focus_voice_turn(
@@ -1184,7 +1342,7 @@ async def get_encouragement():
             if 5 <= hour < 12:
                 options = [
                     "早上好呀，今天准备学习什么呢？",
-                    "早安，加油学习哦。",
+                    "早安，开始今天的学习吧。",
                 ]
             elif 12 <= hour < 18:
                 options = [

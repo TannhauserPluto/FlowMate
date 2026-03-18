@@ -4,11 +4,15 @@ FlowMate-Echo Agent Brain
 
 import json
 import os
+import re
 from typing import Optional, List
 import httpx
 from config import settings
 from .prompt_templates import PromptTemplates
 from demo_task_breakdown import get_demo_task_breakdown
+
+
+TASK_TEXT_FILLER_RE = re.compile(r"^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧)+$")
 
 
 class AgentBrain:
@@ -62,7 +66,108 @@ class AgentBrain:
                 return value["steps"]
         return self.prompts.PRESET_TASK_RESPONSES["default"]["steps"]
 
+    def _normalize_task_text(self, task_description: str) -> str:
+        return " ".join(str(task_description or "").split()).strip()
+
+    def _compact_task_text(self, task_description: str) -> str:
+        return re.sub(r"[\s，。！？、,.!?;；:：'\"“”‘’（）()【】\[\]<>《》]", "", self._normalize_task_text(task_description))
+
+    def _validate_task_text(self, task_description: str) -> Optional[str]:
+        cleaned = self._normalize_task_text(task_description)
+        compact = self._compact_task_text(task_description)
+        if not cleaned:
+            return "empty"
+        if not compact:
+            return "punctuation_only"
+        if len(compact) < 2:
+            return "too_short"
+        if TASK_TEXT_FILLER_RE.fullmatch(compact):
+            return "filler_only"
+        return None
+
+    def _sanitize_step_text(self, text: str) -> str:
+        cleaned = " ".join(str(text or "").split()).strip()
+        cleaned = re.sub(r"^[0-9一二三四五六七八九十]+[.、)）-]?", "", cleaned).strip()
+        cleaned = cleaned.strip('[]{}"“”')
+        return cleaned[:10]
+
+    def _build_controlled_fallback_steps(self, task_description: str) -> List[str]:
+        text = self._normalize_task_text(task_description)
+        if any(token in text for token in ("论文", "报告", "汇报", "作文", "文案", "总结")):
+            return ["打开文档", "列个提纲", "写一段开头"]
+        if any(token in text for token in ("学习", "复习", "看书", "背", "课程", "物理", "英语", "数学")):
+            return ["打开资料", "读第一节", "记一条重点"]
+        if any(token in text for token in ("代码", "编程", "页面", "前端", "后端", "报错", "项目", "数据库")):
+            return ["打开项目", "定位问题", "先改一处"]
+        return ["打开资料", "列三个点", "先做一步"]
+
+    def _sanitize_steps(self, steps: List[str], task_description: str) -> List[str]:
+        fallback_steps = self._build_controlled_fallback_steps(task_description)
+        result: List[str] = []
+        seen = set()
+        for raw in steps or []:
+            step = self._sanitize_step_text(raw)
+            if not step or step in seen:
+                continue
+            result.append(step)
+            seen.add(step)
+            if len(result) >= 3:
+                break
+        for fallback in fallback_steps:
+            if len(result) >= 3:
+                break
+            if fallback in seen:
+                continue
+            result.append(fallback)
+            seen.add(fallback)
+        return result[:3]
+
+    def _parse_breakdown_steps(self, response: Optional[str]) -> List[str]:
+        text = (response or "").strip()
+        if not text:
+            return []
+
+        json_candidates: List[str] = []
+        brace_start = text.find("{")
+        brace_end = text.rfind("}") + 1
+        if brace_start >= 0 and brace_end > brace_start:
+            json_candidates.append(text[brace_start:brace_end])
+        bracket_start = text.find("[")
+        bracket_end = text.rfind("]") + 1
+        if bracket_start >= 0 and bracket_end > bracket_start:
+            json_candidates.append(text[bracket_start:bracket_end])
+
+        for candidate in json_candidates:
+            try:
+                data = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and isinstance(data.get("steps"), list):
+                return [str(item) for item in data.get("steps") or []]
+            if isinstance(data, list):
+                return [str(item) for item in data]
+
+        tasks: List[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped[0].isdigit() or stripped.startswith("-"):
+                task = stripped.lstrip("0123456789.-) 、")
+                if task:
+                    tasks.append(task)
+        return tasks
+
     async def generate_task_breakdown(self, task_description: str) -> List[str]:
+        normalized_task = self._normalize_task_text(task_description)
+        invalid_reason = self._validate_task_text(normalized_task)
+        if invalid_reason:
+            print(
+                f"[GenerateTasks] invalid_task_rejected reason={invalid_reason} "
+                f"input_task={normalized_task[:120]}"
+            )
+            raise ValueError(invalid_reason)
+
         demo_breakdown = get_demo_task_breakdown(task_description)
         if demo_breakdown:
             return list(demo_breakdown.steps)
@@ -74,35 +179,22 @@ class AgentBrain:
 
         messages = [
             {"role": "system", "content": self.prompts.task_breakdown_system},
-            {"role": "user", "content": task_description},
+            {"role": "user", "content": normalized_task},
         ]
 
         response = await self._call_qwen(messages, max_tokens=200)
+        print(f"[GenerateTasks] llm_raw={((response or '').replace(chr(10), ' '))[:240]}")
         if response:
-            try:
-                json_start = response.find("{")
-                json_end = response.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = response[json_start:json_end]
-                    data = json.loads(json_str)
-                    if "steps" in data and isinstance(data["steps"], list):
-                        return data["steps"][:3]
-            except json.JSONDecodeError:
-                pass
-
-            tasks = []
-            for line in response.strip().split("\n"):
-                line = line.strip()
-                if line and (line[0].isdigit() or line.startswith("-")):
-                    task = line.lstrip("0123456789.-) ").strip()
-                    if task:
-                        tasks.append(task)
-            if tasks:
-                return tasks[:3]
+            parsed_steps = self._sanitize_steps(self._parse_breakdown_steps(response), normalized_task)
+            if parsed_steps:
+                print(f"[GenerateTasks] parsed_steps={parsed_steps}")
+                return parsed_steps
 
         if self.use_preset:
             return self._get_preset_tasks(task_description)
-        raise RuntimeError("LLM task breakdown unavailable")
+        fallback_steps = self._build_controlled_fallback_steps(normalized_task)
+        print(f"[GenerateTasks] parse_failed_fallback={fallback_steps}")
+        return fallback_steps
 
     async def generate_task_topic(self, task_description: str, steps: List[str]) -> str:
         demo_breakdown = get_demo_task_breakdown(task_description)
@@ -178,13 +270,13 @@ class AgentBrain:
     async def chat(self, message: str, context: Optional[str] = None) -> str:
         if self.use_preset:
             message_lower = message.lower()
-            if "?" in message_lower or "?" in message_lower:
+            if "?" in message_lower or "？" in message_lower:
                 return "你是遇到什么问题了吗？"
-            if "?" in message_lower or "?" in message_lower:
+            if "怎么" in message_lower or "不会" in message_lower or "报错" in message_lower:
                 return "你是遇到什么问题了吗？"
-            if "??" in message_lower or "hi" in message_lower:
+            if "你好" in message_lower or "hi" in message_lower:
                 return "你好呀，需要帮忙吗？"
-            if "?" in message_lower:
+            if "help" in message_lower or "帮帮我" in message_lower:
                 return "我在这里，随时可以帮你。"
 
         messages = [{"role": "system", "content": self.prompts.chat_system}]

@@ -11,10 +11,10 @@ let isQuitting = false;
 
 const isDev = !app.isPackaged;
 const MINI_DESIGN_WIDTH = 266;
-const MINI_DESIGN_HEIGHT = 241;
+const MINI_DESIGN_HEIGHT = 286;
 const MINI_ASPECT_RATIO = MINI_DESIGN_WIDTH / MINI_DESIGN_HEIGHT;
 const MINI_MIN_WIDTH = 220;
-const MINI_MAX_WIDTH = 420;
+const MINI_MAX_WIDTH = 520;
 const MINI_MIN_HEIGHT = Math.round(MINI_MIN_WIDTH / MINI_ASPECT_RATIO);
 const MINI_MAX_HEIGHT = Math.round(MINI_MAX_WIDTH / MINI_ASPECT_RATIO);
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));

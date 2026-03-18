@@ -1,14 +1,17 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   MEMO_STORAGE_KEY,
-  TODO_STORAGE_KEY,
+  TODO_PAGES_STORAGE_KEY,
   parseMemos,
-  parseTodoState,
+  parseTodoPagesState,
   readMemos,
-  serializeTodoState,
-  writeTodoState,
+  readTodoPagesState,
+  readTodoState,
+  serializeTodoPagesState,
+  writeTodoPagesState,
   type MemoItem,
-  type StoredTodoState,
+  type StoredTodoBoard,
+  type StoredTodoPagesState,
   type TodoEntry,
 } from './lib/storage';
 
@@ -23,6 +26,10 @@ type ResizeState = {
   axis?: 'width' | 'height';
 };
 
+type MiniTodoCardState = 'front' | 'back' | 'peek-prev' | 'peek-next' | 'hidden';
+
+type MiniInputEvent = React.MouseEvent<HTMLInputElement> | React.KeyboardEvent<HTMLInputElement>;
+
 const getBeijingDate = () =>
   new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Shanghai',
@@ -31,14 +38,36 @@ const getBeijingDate = () =>
     day: 'numeric',
   }).format(new Date());
 
-
 const MINI_DESIGN_WIDTH = 266;
-const MINI_DESIGN_HEIGHT = 241;
+const MINI_DESIGN_HEIGHT = 286;
 const MINI_ASPECT_RATIO = MINI_DESIGN_WIDTH / MINI_DESIGN_HEIGHT;
 const MINI_MIN_WIDTH = 220;
-const MINI_MAX_WIDTH = 420;
+const MINI_MAX_WIDTH = 520;
 const MINI_MIN_HEIGHT = Math.round(MINI_MIN_WIDTH / MINI_ASPECT_RATIO);
 const MINI_MAX_HEIGHT = Math.round(MINI_MAX_WIDTH / MINI_ASPECT_RATIO);
+const EMPTY_TODO_SLOT_HINT = '待补充';
+
+const stopMiniInputEvent = (event: MiniInputEvent) => {
+  event.stopPropagation();
+};
+
+const buildLegacyTodoPagesState = (): StoredTodoPagesState | null => {
+  const legacyState = readTodoState();
+  if (!legacyState) return null;
+  const boardId = `mini-legacy-${legacyState.taskDate || Date.now()}`;
+  return {
+    currentBoardId: boardId,
+    boards: [
+      {
+        id: boardId,
+        title: legacyState.taskTitle,
+        date: legacyState.taskDate,
+        todoItems: legacyState.todoItems,
+        doneItems: legacyState.doneItems,
+      },
+    ],
+  };
+};
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -96,31 +125,61 @@ const computeBounds = (state: ResizeState, dx: number, dy: number): Bounds => {
 };
 
 const MiniTodoCard = ({
+  boardId,
   date,
   title,
   todoItems,
   doneItems,
-  isActive,
+  pageIndex,
+  pageCount,
+  cardState,
   onActivate,
   onMarkDone,
   onRestore,
+  onUpdateTodo,
+  onUpdateDone,
+  onPrevPage,
+  onNextPage,
+  onSelectPage,
 }: {
+  boardId: string;
   date: string;
   title: string;
   todoItems: TodoEntry[];
   doneItems: TodoEntry[];
-  isActive: boolean;
+  pageIndex: number;
+  pageCount: number;
+  cardState: MiniTodoCardState;
   onActivate: () => void;
   onMarkDone: (id: string) => void;
   onRestore: (id: string) => void;
-}) => (
+  onUpdateTodo: (id: string, text: string) => void;
+  onUpdateDone: (id: string, text: string) => void;
+  onPrevPage: () => void;
+  onNextPage: () => void;
+  onSelectPage: (index: number) => void;
+}) => {
+  const isFront = cardState === 'front';
+  const canActivate = cardState !== 'hidden';
+  const cardStateClass =
+    cardState === 'front'
+      ? 'is-front'
+      : cardState === 'back'
+        ? 'is-back'
+        : cardState === 'peek-prev'
+          ? 'is-peek-prev'
+          : cardState === 'peek-next'
+            ? 'is-peek-next'
+            : 'is-hidden';
+  return (
   <div
-    className={`mini-card ${isActive ? 'is-front' : 'is-back'}`}
+    className={`mini-card ${cardStateClass}`}
     role="button"
-    tabIndex={0}
-    aria-pressed={isActive}
-    onClick={onActivate}
+    tabIndex={canActivate ? 0 : -1}
+    aria-pressed={isFront}
+    onClick={canActivate ? onActivate : undefined}
     onKeyDown={(event) => {
+      if (!canActivate) return;
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
         onActivate();
@@ -143,11 +202,20 @@ const MiniTodoCard = ({
               event.stopPropagation();
               onMarkDone(item.id);
             }}
-            disabled={!isActive}
+            disabled={!isFront || !item.text.trim()}
           >
             <span className="todo-check-circle" />
           </button>
-          <span className="todo-text">{item.text}</span>
+          <input
+            className={`todo-text-input ${item.text.trim() ? '' : 'is-empty'}`}
+            type="text"
+            value={item.text}
+            placeholder={EMPTY_TODO_SLOT_HINT}
+            disabled={!isFront}
+            onClick={stopMiniInputEvent}
+            onKeyDown={stopMiniInputEvent}
+            onChange={(event) => onUpdateTodo(item.id, event.target.value)}
+          />
         </li>
       ))}
     </ul>
@@ -164,16 +232,73 @@ const MiniTodoCard = ({
               event.stopPropagation();
               onRestore(item.id);
             }}
-            disabled={!isActive}
+            disabled={!isFront}
           >
             <span className="todo-check-circle" />
           </button>
-          <span className="todo-text">{item.text}</span>
+          <input
+            className={`todo-text-input ${item.text.trim() ? '' : 'is-empty'}`}
+            type="text"
+            value={item.text}
+            placeholder={EMPTY_TODO_SLOT_HINT}
+            disabled={!isFront}
+            onClick={stopMiniInputEvent}
+            onKeyDown={stopMiniInputEvent}
+            onChange={(event) => onUpdateDone(item.id, event.target.value)}
+          />
         </li>
       ))}
     </ul>
+    {pageCount > 1 && cardState !== 'hidden' && (
+      <div className="mini-todo-pager" onClick={stopMiniInputEvent} onKeyDown={stopMiniInputEvent}>
+        <button
+          className="mini-page-arrow"
+          type="button"
+          aria-label="Previous todo page"
+          disabled={!isFront || pageIndex === 0}
+          onClick={(event) => {
+            event.stopPropagation();
+            onPrevPage();
+          }}
+        >
+          ‹
+        </button>
+        <div className="mini-page-dots" aria-label="Todo pages">
+          {Array.from({ length: pageCount }, (_unused, index) => {
+            const isCurrent = index === pageIndex;
+            return (
+              <button
+                key={`${boardId}-page-${index}`}
+                className={`mini-page-dot ${isCurrent ? 'is-active' : ''}`}
+                type="button"
+                aria-label={`Go to todo page ${index + 1}`}
+                aria-pressed={isCurrent}
+                disabled={!isFront}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelectPage(index);
+                }}
+              />
+            );
+          })}
+        </div>
+        <button
+          className="mini-page-arrow"
+          type="button"
+          aria-label="Next todo page"
+          disabled={!isFront || pageIndex >= pageCount - 1}
+          onClick={(event) => {
+            event.stopPropagation();
+            onNextPage();
+          }}
+        >
+          ›
+        </button>
+      </div>
+    )}
   </div>
-);
+  );
+};
 
 const MiniMemoCard = ({
   date,
@@ -183,6 +308,8 @@ const MiniMemoCard = ({
   onActivate,
   onMarkDone,
   onRestore,
+  onUpdateTodoMemo,
+  onUpdateDoneMemo,
 }: {
   date: string;
   todoMemos: MemoListItem[];
@@ -191,6 +318,8 @@ const MiniMemoCard = ({
   onActivate: () => void;
   onMarkDone: (id: string) => void;
   onRestore: (id: string) => void;
+  onUpdateTodoMemo: (id: string, content: string) => void;
+  onUpdateDoneMemo: (id: string, content: string) => void;
 }) => (
   <div
     className={`mini-card ${isActive ? 'is-front' : 'is-back'}`}
@@ -207,7 +336,7 @@ const MiniMemoCard = ({
   >
     <div className="todo-meta">
       <span className="todo-date">{date}</span>
-      <span className="todo-project">⚡️闪念</span>
+      <span className="todo-project">✨闪念</span>
     </div>
     <div className="todo-title-row">TO DO</div>
     <ul className="todo-list todo-list--todo">
@@ -226,7 +355,16 @@ const MiniMemoCard = ({
             >
               <span className="todo-check-circle" />
             </button>
-            <span className="todo-text">{memo.content}</span>
+            <input
+              className={`todo-text-input ${memo.content.trim() ? '' : 'is-empty'}`}
+              type="text"
+              value={memo.content}
+              placeholder={EMPTY_TODO_SLOT_HINT}
+              disabled={!isActive}
+              onClick={stopMiniInputEvent}
+              onKeyDown={stopMiniInputEvent}
+              onChange={(event) => onUpdateTodoMemo(memo.id, event.target.value)}
+            />
           </li>
         ))
       ) : (
@@ -250,7 +388,16 @@ const MiniMemoCard = ({
           >
             <span className="todo-check-circle" />
           </button>
-          <span className="todo-text">{memo.content}</span>
+          <input
+            className={`todo-text-input ${memo.content.trim() ? '' : 'is-empty'}`}
+            type="text"
+            value={memo.content}
+            placeholder={EMPTY_TODO_SLOT_HINT}
+            disabled={!isActive}
+            onClick={stopMiniInputEvent}
+            onKeyDown={stopMiniInputEvent}
+            onChange={(event) => onUpdateDoneMemo(memo.id, event.target.value)}
+          />
         </li>
       ))}
     </ul>
@@ -258,7 +405,10 @@ const MiniMemoCard = ({
 );
 
 const MiniApp: React.FC = () => {
-  const initialTodoState = useMemo<StoredTodoState | null>(() => null, []);
+  const initialTodoPagesState = useMemo<StoredTodoPagesState | null>(
+    () => readTodoPagesState() ?? buildLegacyTodoPagesState(),
+    [],
+  );
   const frameRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<{
     startX: number;
@@ -268,22 +418,26 @@ const MiniApp: React.FC = () => {
   } | null>(null);
   const dragRafRef = useRef<number | null>(null);
   const dragSuppressClickRef = useRef(false);
-  const [taskTitle, setTaskTitle] = useState(initialTodoState?.taskTitle ?? '');
-  const [taskDate, setTaskDate] = useState(initialTodoState?.taskDate ?? getBeijingDate());
-  const [todoItems, setTodoItems] = useState<TodoEntry[]>(
-    () => initialTodoState?.todoItems ?? [],
+  const [todoPages, setTodoPages] = useState<StoredTodoBoard[]>(() => initialTodoPagesState?.boards ?? []);
+  const [currentBoardId, setCurrentBoardId] = useState(initialTodoPagesState?.currentBoardId ?? '');
+  const [selectedTodoBoardId, setSelectedTodoBoardId] = useState(
+    initialTodoPagesState?.currentBoardId
+      || initialTodoPagesState?.boards[initialTodoPagesState.boards.length - 1]?.id
+      || '',
   );
-  const [doneItems, setDoneItems] = useState<TodoEntry[]>(() => initialTodoState?.doneItems ?? []);
   const [memos, setMemos] = useState<MemoItem[]>(() => readMemos().slice(-3));
   const [memoDoneIds, setMemoDoneIds] = useState<Set<string>>(() => new Set());
   const [activePanel, setActivePanel] = useState<MiniPanel>('todo');
-  const todoStorageRef = useRef(initialTodoState ? serializeTodoState(initialTodoState) : '');
+  const todoPagesStorageRef = useRef(
+    initialTodoPagesState ? serializeTodoPagesState(initialTodoPagesState) : '',
+  );
+  const memoStorageRef = useRef(JSON.stringify(readMemos().slice(-3)));
   const lastMemoKeyRef = useRef<string | null>(null);
   const memoUpdateSeenRef = useRef(false);
-  const lastTodoKeyRef = useRef<string | null>(null);
-  const todoUpdateSeenRef = useRef(false);
+  const lastTodoPagesKeyRef = useRef<string | null>(null);
+  const todoPagesUpdateSeenRef = useRef(false);
   const memoItems = useMemo<MemoListItem[]>(
-    () => memos.map((memo) => ({ ...memo, id: `${memo.created_at}-${memo.content}` })),
+    () => memos.map((memo) => ({ ...memo, id: memo.created_at })),
     [memos],
   );
   const memoTodoItems = useMemo(
@@ -294,6 +448,31 @@ const MiniApp: React.FC = () => {
     () => memoItems.filter((memo) => memoDoneIds.has(memo.id)),
     [memoDoneIds, memoItems],
   );
+  const selectedTodoBoard = useMemo(() => {
+    if (!todoPages.length) return null;
+    return todoPages.find((board) => board.id === selectedTodoBoardId)
+      ?? todoPages.find((board) => board.id === currentBoardId)
+      ?? todoPages[todoPages.length - 1]
+      ?? null;
+  }, [currentBoardId, selectedTodoBoardId, todoPages]);
+  const selectedTodoPageIndex = useMemo(() => {
+    if (!selectedTodoBoard) return -1;
+    return todoPages.findIndex((board) => board.id === selectedTodoBoard.id);
+  }, [selectedTodoBoard, todoPages]);
+
+  useEffect(() => {
+    if (!todoPages.length) {
+      if (selectedTodoBoardId) setSelectedTodoBoardId('');
+      if (currentBoardId) setCurrentBoardId('');
+      return;
+    }
+    if (!todoPages.some((board) => board.id === currentBoardId)) {
+      setCurrentBoardId(todoPages[todoPages.length - 1]?.id ?? '');
+    }
+    if (!todoPages.some((board) => board.id === selectedTodoBoardId)) {
+      setSelectedTodoBoardId(currentBoardId || todoPages[todoPages.length - 1]?.id || '');
+    }
+  }, [currentBoardId, selectedTodoBoardId, todoPages]);
 
   useEffect(() => {
     document.body.classList.add('mini-mode');
@@ -473,19 +652,22 @@ const MiniApp: React.FC = () => {
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === TODO_STORAGE_KEY) {
-        const next = parseTodoState(event.newValue);
-        if (!next) return;
-        const serialized = serializeTodoState(next);
-        if (serialized === todoStorageRef.current) return;
-        todoStorageRef.current = serialized;
-        setTaskTitle(next.taskTitle);
-        setTaskDate(next.taskDate);
-        setTodoItems(next.todoItems);
-        setDoneItems(next.doneItems);
+      if (event.key === TODO_PAGES_STORAGE_KEY) {
+        const nextPages = parseTodoPagesState(event.newValue);
+        if (!nextPages) return;
+        const serialized = serializeTodoPagesState(nextPages);
+        if (serialized === todoPagesStorageRef.current) return;
+        todoPagesStorageRef.current = serialized;
+        setTodoPages(nextPages.boards);
+        setCurrentBoardId(nextPages.currentBoardId);
+        setSelectedTodoBoardId(
+          nextPages.currentBoardId || nextPages.boards[nextPages.boards.length - 1]?.id || '',
+        );
       }
       if (event.key === MEMO_STORAGE_KEY) {
-        setMemos(parseMemos(event.newValue).slice(-3));
+        const nextMemos = parseMemos(event.newValue).slice(-3);
+        memoStorageRef.current = JSON.stringify(nextMemos);
+        setMemos(nextMemos);
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -510,6 +692,7 @@ const MiniApp: React.FC = () => {
       const payload = event.data as { type?: string; memos?: MemoItem[] };
       if (payload?.type !== 'memo_update') return;
       const next = parseMemos(JSON.stringify(payload.memos ?? []));
+      memoStorageRef.current = JSON.stringify(next.slice(-3));
       setMemos(next.slice(-3));
     };
     channel.addEventListener('message', handleMessage);
@@ -534,51 +717,81 @@ const MiniApp: React.FC = () => {
   }, [memos]);
 
   useEffect(() => {
-    const nextState: StoredTodoState = {
-      taskTitle,
-      taskDate,
-      todoItems,
-      doneItems,
-    };
-    const serialized = serializeTodoState(nextState);
-    if (serialized === todoStorageRef.current) return;
-    todoStorageRef.current = serialized;
-    writeTodoState(nextState);
-  }, [taskTitle, taskDate, todoItems, doneItems]);
+    const serialized = JSON.stringify(memos);
+    if (serialized === memoStorageRef.current) return;
+    memoStorageRef.current = serialized;
+    try {
+      window.localStorage.setItem(MEMO_STORAGE_KEY, serialized);
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel('flowmate:memos');
+        channel.postMessage({ type: 'memo_update', memos });
+        channel.close();
+      }
+    } catch {
+      // ignore memo persistence failures
+    }
+  }, [memos]);
 
   useEffect(() => {
-    const nextKey = serializeTodoState({
-      taskTitle,
-      taskDate,
-      todoItems,
-      doneItems,
+    const nextState: StoredTodoPagesState = {
+      currentBoardId,
+      boards: todoPages,
+    };
+    const serialized = serializeTodoPagesState(nextState);
+    if (serialized === todoPagesStorageRef.current) return;
+    todoPagesStorageRef.current = serialized;
+    writeTodoPagesState(nextState);
+  }, [currentBoardId, todoPages]);
+
+  useEffect(() => {
+    const nextKey = serializeTodoPagesState({
+      currentBoardId,
+      boards: todoPages,
     });
-    if (!todoUpdateSeenRef.current) {
-      todoUpdateSeenRef.current = true;
-      lastTodoKeyRef.current = nextKey;
+    if (!todoPagesUpdateSeenRef.current) {
+      todoPagesUpdateSeenRef.current = true;
+      lastTodoPagesKeyRef.current = nextKey;
       return;
     }
-    if (nextKey !== lastTodoKeyRef.current) {
+    if (nextKey !== lastTodoPagesKeyRef.current) {
       setActivePanel('todo');
     }
-    lastTodoKeyRef.current = nextKey;
-  }, [taskTitle, taskDate, todoItems, doneItems]);
+    lastTodoPagesKeyRef.current = nextKey;
+  }, [currentBoardId, todoPages]);
+
+  const updateTodoBoardById = (
+    boardId: string,
+    updater: (board: StoredTodoBoard) => StoredTodoBoard,
+  ) => {
+    if (!boardId) return;
+    setTodoPages((prev) => prev.map((board) => (board.id === boardId ? updater(board) : board)));
+  };
 
   const markDone = (id: string) => {
-    setTodoItems((prev) => {
-      const item = prev.find((todo) => todo.id === id);
-      if (!item) return prev;
-      setDoneItems((prevDone) => [...prevDone.filter((todo) => todo.id !== id), item]);
-      return prev.filter((todo) => todo.id !== id);
+    const boardId = selectedTodoBoard?.id;
+    if (!boardId) return;
+    updateTodoBoardById(boardId, (board) => {
+      const item = board.todoItems.find((todo) => todo.id === id);
+      if (!item || !item.text.trim()) return board;
+      return {
+        ...board,
+        todoItems: board.todoItems.filter((todo) => todo.id !== id),
+        doneItems: [...board.doneItems.filter((todo) => todo.id !== id), item],
+      };
     });
   };
 
   const restoreTodo = (id: string) => {
-    setDoneItems((prev) => {
-      const item = prev.find((todo) => todo.id === id);
-      if (!item) return prev;
-      setTodoItems((prevTodo) => [...prevTodo.filter((todo) => todo.id !== id), item]);
-      return prev.filter((todo) => todo.id !== id);
+    const boardId = selectedTodoBoard?.id;
+    if (!boardId) return;
+    updateTodoBoardById(boardId, (board) => {
+      const item = board.doneItems.find((todo) => todo.id === id);
+      if (!item) return board;
+      return {
+        ...board,
+        doneItems: board.doneItems.filter((todo) => todo.id !== id),
+        todoItems: [...board.todoItems.filter((todo) => todo.id !== id), item],
+      };
     });
   };
 
@@ -593,6 +806,57 @@ const MiniApp: React.FC = () => {
       return next;
     });
   };
+
+  const updateTodoItemText = (id: string, text: string) => {
+    const boardId = selectedTodoBoard?.id;
+    if (!boardId) return;
+    updateTodoBoardById(boardId, (board) => ({
+      ...board,
+      todoItems: board.todoItems.map((todo) => (todo.id === id ? { ...todo, text } : todo)),
+    }));
+  };
+
+  const updateDoneItemText = (id: string, text: string) => {
+    const boardId = selectedTodoBoard?.id;
+    if (!boardId) return;
+    updateTodoBoardById(boardId, (board) => ({
+      ...board,
+      doneItems: board.doneItems.map((todo) => (todo.id === id ? { ...todo, text } : todo)),
+    }));
+  };
+
+  const updateMemoContent = (id: string, content: string) => {
+    setMemos((prev) => prev.map((memo) => (
+      memo.created_at === id ? { ...memo, content } : memo
+    )));
+  };
+
+  const selectTodoPageByIndex = (index: number) => {
+    const nextBoard = todoPages[index];
+    if (!nextBoard) return;
+    setSelectedTodoBoardId(nextBoard.id);
+    setActivePanel('todo');
+  };
+
+  const goToPrevTodoPage = () => {
+    if (selectedTodoPageIndex <= 0) return;
+    selectTodoPageByIndex(selectedTodoPageIndex - 1);
+  };
+
+  const goToNextTodoPage = () => {
+    if (selectedTodoPageIndex < 0 || selectedTodoPageIndex >= todoPages.length - 1) return;
+    selectTodoPageByIndex(selectedTodoPageIndex + 1);
+  };
+
+  const renderedTodoPages = todoPages.length
+    ? todoPages
+    : [{
+      id: 'mini-empty-board',
+      title: '任务清单',
+      date: getBeijingDate(),
+      todoItems: [] as TodoEntry[],
+      doneItems: [] as TodoEntry[],
+    }];
 
   return (
     <div
@@ -617,24 +881,52 @@ const MiniApp: React.FC = () => {
         </div>
         <div className="mini-scale">
           <div className="mini-stack">
-            <MiniTodoCard
-              date={taskDate}
-              title={taskTitle}
-              todoItems={todoItems}
-              doneItems={doneItems}
-              isActive={activePanel === 'todo'}
-              onActivate={() => setActivePanel('todo')}
-              onMarkDone={markDone}
-              onRestore={restoreTodo}
-            />
+            {renderedTodoPages.map((board, index) => {
+              const isSelectedTodoPage = board.id === (selectedTodoBoard?.id ?? 'mini-empty-board');
+              const isNeighborPrev = activePanel === 'todo' && index === selectedTodoPageIndex - 1;
+              const isNeighborNext = activePanel === 'todo' && index === selectedTodoPageIndex + 1;
+              const cardState: MiniTodoCardState = isSelectedTodoPage
+                ? (activePanel === 'todo' ? 'front' : 'back')
+                : isNeighborPrev
+                  ? 'peek-prev'
+                  : isNeighborNext
+                    ? 'peek-next'
+                    : 'hidden';
+              return (
+                <MiniTodoCard
+                  key={board.id}
+                  boardId={board.id}
+                  date={board.date}
+                  title={board.title}
+                  todoItems={board.todoItems}
+                  doneItems={board.doneItems}
+                  pageIndex={index}
+                  pageCount={renderedTodoPages.length}
+                  cardState={cardState}
+                  onActivate={() => {
+                    setSelectedTodoBoardId(board.id);
+                    setActivePanel('todo');
+                  }}
+                  onMarkDone={markDone}
+                  onRestore={restoreTodo}
+                  onUpdateTodo={updateTodoItemText}
+                  onUpdateDone={updateDoneItemText}
+                  onPrevPage={goToPrevTodoPage}
+                  onNextPage={goToNextTodoPage}
+                  onSelectPage={selectTodoPageByIndex}
+                />
+              );
+            })}
             <MiniMemoCard
-              date={taskDate}
+              date={selectedTodoBoard?.date ?? getBeijingDate()}
               todoMemos={memoTodoItems}
               doneMemos={memoDoneItems}
               isActive={activePanel === 'memo'}
               onActivate={() => setActivePanel('memo')}
               onMarkDone={markMemoDone}
               onRestore={restoreMemo}
+              onUpdateTodoMemo={updateMemoContent}
+              onUpdateDoneMemo={updateMemoContent}
             />
           </div>
         </div>

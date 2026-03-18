@@ -22,11 +22,18 @@ import vidTalk from './assets/video_loops/talk.webm';
 import vidFocus from './assets/video_loops/focus.webm';
 import vidStretch from './assets/video_loops/Stretch.webm';
 import {
+  normalizeTodoItems,
+  parseTodoPagesState,
   parseTodoState,
+  serializeTodoPagesState,
   serializeTodoState,
   MEMO_STORAGE_KEY,
+  TODO_PAGES_STORAGE_KEY,
   TODO_STORAGE_KEY,
+  writeTodoPagesState,
   writeTodoState,
+  type StoredTodoBoard,
+  type StoredTodoPagesState,
   type StoredTodoState,
 } from './lib/storage';
 
@@ -47,6 +54,14 @@ type TaskBoard = {
   todoItems: TodoItem[];
   doneItems: TodoItem[];
 };
+
+const toStoredTodoBoard = (board: TaskBoard): StoredTodoBoard => ({
+  id: board.id,
+  title: board.title,
+  date: board.date,
+  todoItems: [...board.todoItems],
+  doneItems: [...board.doneItems],
+});
 
 type TaskTimelineItem =
   | { type: 'message'; id: string }
@@ -83,9 +98,10 @@ const DEFAULT_TODO_TEXTS = [
 ];
 const BREAK_DEFAULT_SECONDS = 5 * 60;
 const BREAK_DEFAULT_MESSAGE = '恭喜你完成专注，休息五分钟吧';
+const EMPTY_TODO_SLOT_HINT = '待补充';
 const createBoardId = () => `board-${Date.now()}`;
 const buildDefaultTodos = (seed = Date.now()) =>
-  DEFAULT_TODO_TEXTS.map((text, index) => ({ id: `todo-${seed}-${index}`, text }));
+  normalizeTodoItems(DEFAULT_TODO_TEXTS.map((text, index) => ({ id: `todo-${seed}-${index}`, text })));
 
 const STAR_LEVELS = '32234312210322320'.split('').map((value) => Number.parseInt(value, 10));
 const STAR_LEVEL_IMAGES = [starLv0, starLv1, starLv2, starLv3, starLv4];
@@ -119,8 +135,27 @@ const sanitizeText = (text: string) =>
     .replace(/<Speech\|>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+const VOICE_TRANSCRIPT_HINT = '我刚刚没听清，我们再说一次就好。';
+const VOICE_TRANSCRIPT_FILLER_RE = /^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧|好的|好啊|好呀|好呢|嗯嗯|啊啊|哦哦|诶诶|欸欸|哎呀)+$/;
+const assessVoiceTranscript = (text: string) => {
+  const cleaned = sanitizeText(text);
+  const normalized = cleaned.replace(/[\s，。！？、,.!?;；:：'"“”‘’（）()【】\[\]<>《》]/g, '');
+  if (!cleaned) {
+    return { usable: false, reason: 'empty', cleaned, normalized };
+  }
+  if (!normalized) {
+    return { usable: false, reason: 'punctuation_only', cleaned, normalized };
+  }
+  if (normalized.length < 2) {
+    return { usable: false, reason: 'too_short', cleaned, normalized };
+  }
+  if (VOICE_TRANSCRIPT_FILLER_RE.test(normalized)) {
+    return { usable: false, reason: 'filler_only', cleaned, normalized };
+  }
+  return { usable: true, reason: 'ok', cleaned, normalized };
+};
 const hasFlashIdeaKeyword = (text: string) =>
-  text.includes('闪念') || text.includes('闪电');
+  text.includes('闪念') || text.includes('闪电') || text.includes('提醒');
 const DEFAULT_BUBBLE_FONT =
   "400 12.183px/1.6 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
 const DEFAULT_BUBBLE_TEXT_WIDTH = 228;
@@ -403,6 +438,7 @@ const App: React.FC = () => {
   const [transitioning, setTransitioning] = useState<Record<string, 'toDone' | 'toTodo'>>({});
   const [archivedTransitions, setArchivedTransitions] = useState<Record<string, 'toDone' | 'toTodo'>>({});
   const todoStorageRef = useRef(initialTodoState ? serializeTodoState(initialTodoState) : '');
+  const todoPagesStorageRef = useRef('');
 
   const taskInputRef = useRef<HTMLInputElement | null>(null);
   const taskScrollRef = useRef<HTMLDivElement | null>(null);
@@ -414,6 +450,23 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
+      if (event.key === TODO_PAGES_STORAGE_KEY) {
+        const nextPages = parseTodoPagesState(event.newValue);
+        if (!nextPages) return;
+        const serializedPages = serializeTodoPagesState(nextPages);
+        if (serializedPages === todoPagesStorageRef.current) return;
+        todoPagesStorageRef.current = serializedPages;
+        const currentBoard = nextPages.boards.find((board) => board.id === nextPages.currentBoardId)
+          ?? nextPages.boards[nextPages.boards.length - 1];
+        if (!currentBoard) return;
+        setActiveBoardId(currentBoard.id);
+        setTaskTitle(currentBoard.title);
+        setTaskDate(currentBoard.date);
+        setTodoItems(currentBoard.todoItems);
+        setDoneItems(currentBoard.doneItems);
+        setTaskBoards(nextPages.boards.filter((board) => board.id !== currentBoard.id));
+        return;
+      }
       if (event.key !== TODO_STORAGE_KEY) return;
       const next = parseTodoState(event.newValue);
       if (!next) return;
@@ -455,11 +508,30 @@ const App: React.FC = () => {
     writeTodoState(nextState);
   }, [taskTitle, taskDate, todoItems, doneItems]);
 
+  useEffect(() => {
+    const currentBoard: TaskBoard = {
+      id: activeBoardId,
+      title: taskTitle,
+      date: taskDate,
+      todoItems,
+      doneItems,
+    };
+    const nextPagesState: StoredTodoPagesState = {
+      currentBoardId: activeBoardId,
+      boards: [...taskBoards.map(toStoredTodoBoard), toStoredTodoBoard(currentBoard)],
+    };
+    const serializedPages = serializeTodoPagesState(nextPagesState);
+    if (serializedPages === todoPagesStorageRef.current) return;
+    todoPagesStorageRef.current = serializedPages;
+    writeTodoPagesState(nextPagesState);
+  }, [activeBoardId, taskTitle, taskDate, todoItems, doneItems, taskBoards]);
+
   const renderTodoCard = (
     board: TaskBoard,
     interactive: boolean,
     onMarkDone: (id: string) => void,
     onRestore: (id: string) => void,
+    onUpdateTodoText: (id: string, text: string) => void,
   ) => (
     <div className={`todo-card ${interactive ? '' : 'todo-card--archived'}`}>
       <div className="todo-meta">
@@ -491,11 +563,21 @@ const App: React.FC = () => {
                 type="button"
                 aria-label="Mark done"
                 onClick={() => onMarkDone(item.id)}
-                disabled={!interactive}
+                disabled={!interactive || !sanitizeText(item.text)}
               >
                 <span className="todo-check-circle" />
               </button>
-              <span className="todo-text">{item.text}</span>
+              {interactive ? (
+                <input
+                  className={`todo-text-input ${sanitizeText(item.text) ? '' : 'is-empty'}`}
+                  type="text"
+                  value={item.text}
+                  placeholder={EMPTY_TODO_SLOT_HINT}
+                  onChange={(event) => onUpdateTodoText(item.id, event.target.value)}
+                />
+              ) : (
+                <span className={`todo-text ${sanitizeText(item.text) ? '' : 'is-empty'}`}>{item.text || EMPTY_TODO_SLOT_HINT}</span>
+              )}
             </li>
           );
         })}
@@ -537,6 +619,28 @@ const App: React.FC = () => {
       </ul>
     </div>
   );
+
+  const buildTodoSlotsFromTexts = (texts: string[], baseId: number) => normalizeTodoItems(
+    texts.map((text, index) => ({
+      id: `todo-${baseId}-${index}`,
+      text: sanitizeText(text),
+    })),
+  );
+
+  const updateTodoSlotTextById = (items: TodoItem[], id: string, text: string) =>
+    items.map((todo) => (todo.id === id ? { ...todo, text } : todo));
+
+  const updateActiveTodoText = (id: string, text: string) => {
+    setTodoItems((prev) => updateTodoSlotTextById(prev, id, text));
+  };
+
+  const updateBoardTodoText = (boardId: string, id: string, text: string) => {
+    setTaskBoards((prev) => prev.map((board) => (
+      board.id === boardId
+        ? { ...board, todoItems: updateTodoSlotTextById(board.todoItems, id, text) }
+        : board
+    )));
+  };
 
   const beginThinking = () => {
     thinkingCountRef.current += 1;
@@ -585,7 +689,6 @@ const App: React.FC = () => {
         if (board.id !== boardId) return board;
         const item = board.doneItems.find((todo) => todo.id === itemId);
         if (!item) return board;
-        if (board.todoItems.some((todo) => todo.id === itemId)) return board;
         return {
           ...board,
           doneItems: board.doneItems.filter((todo) => todo.id !== itemId),
@@ -1257,6 +1360,24 @@ const App: React.FC = () => {
     );
   };
 
+  const showVoiceTranscriptHint = (page: VoiceWsPage, hintText = VOICE_TRANSCRIPT_HINT) => {
+    const hint = sanitizeText(hintText) || VOICE_TRANSCRIPT_HINT;
+    if (page === 'home') {
+      setChatAssistantText(hint);
+      setHomeChatBubble(wrapTextByWidth(hint));
+      return;
+    }
+    if (page === 'focus') {
+      setSpeechBubble(hint);
+      return;
+    }
+    if (isInitialTaskLocked) {
+      appendTaskMessage('assistant', hint);
+      return;
+    }
+    setChatAssistantText(hint);
+  };
+
   const generateTasks = async (description: string, archiveExisting: boolean) => {
     if (!description.trim()) return;
     setIsGeneratingTasks(true);
@@ -1266,7 +1387,15 @@ const App: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_description: description }),
       });
-      if (!response.ok) return;
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        console.warn('[GenerateTasks] request_failed', {
+          status: response.status,
+          detail: detail.slice(0, 200),
+          description: description.replace(/\s+/g, ' ').slice(0, 80),
+        });
+        return;
+      }
       const data = await response.json();
       const tasks: string[] = data?.tasks ?? [];
       if (archiveExisting) {
@@ -1284,7 +1413,7 @@ const App: React.FC = () => {
       const baseId = Date.now();
       const newBoardId = `board-${baseId}`;
       setTaskTitle(data?.topic || summarizeTopic(description, tasks));
-      setTodoItems(tasks.map((text, index) => ({ id: `todo-${baseId}-${index}`, text })));
+      setTodoItems(buildTodoSlotsFromTexts(tasks, baseId));
       setDoneItems([]);
       setTaskDate(getBeijingDate());
       setTransitioning({});
@@ -1498,13 +1627,20 @@ const App: React.FC = () => {
     });
   };
 
-  const applyInteraction = async (interaction: any, userText?: string) => {
+  const applyInteraction = async (
+    interaction: any,
+    userText?: string,
+    options?: { archiveExisting?: boolean; skipAssistantBubble?: boolean },
+  ) => {
     if (!interaction) return;
     const cleanedUserText = userText ? sanitizeText(userText) : '';
+    const skipAssistantBubble = Boolean(options?.skipAssistantBubble);
     const isHomeChat = isHomeView && interaction.type === 'chat';
     if (!isInitialTaskLocked && !isHomeChat) {
       if (userText) setChatUserText(cleanedUserText);
-      if (interaction.audio_text) setChatAssistantText(sanitizeText(interaction.audio_text));
+      if (interaction.audio_text && !skipAssistantBubble) {
+        setChatAssistantText(sanitizeText(interaction.audio_text));
+      }
     }
 
     if (interaction.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
@@ -1572,13 +1708,20 @@ const App: React.FC = () => {
       if (cleanedUserText) {
         setChatUserText(cleanedUserText);
       }
-      if (interaction.audio_text) {
+      if (interaction.audio_text && !skipAssistantBubble) {
         setChatAssistantText(sanitizeText(interaction.audio_text));
+      } else if (interaction.audio_text && skipAssistantBubble) {
+        console.log('[BreakdownDedup] skip_duplicate_assistant_append', {
+          reason: 'reuse_stream_bubble',
+        });
       }
       const title = interaction.ui_payload?.content?.title ?? cleanedUserText ?? '任务拆解';
       setTaskTitle(title);
+      const shouldArchive = typeof options?.archiveExisting === 'boolean'
+        ? options.archiveExisting
+        : isInitialTaskLocked;
       if (cleanedUserText) {
-        await generateTasks(cleanedUserText, isInitialTaskLocked);
+        await generateTasks(cleanedUserText, shouldArchive);
       }
       if (cleanedUserText) setIsInitialTaskLocked(true);
       setCurrentView('task');
@@ -1657,7 +1800,32 @@ const App: React.FC = () => {
       }
       console.log('[voice] request_ms', Math.round(performance.now() - requestStart));
       const interaction = payload?.data?.interaction;
-      const userText = payload?.data?.user?.text;
+      const userText = sanitizeText(payload?.data?.user?.text || '');
+      if (interaction?.type === 'breakdown') {
+        const transcriptCheck = assessVoiceTranscript(userText);
+        console.log('[VoiceBreakdownGuard] transcript=', {
+          page: 'home',
+          transcript: transcriptCheck.cleaned.slice(0, 80),
+          reason: transcriptCheck.reason,
+        });
+        if (!transcriptCheck.usable) {
+          console.warn('[VoiceTranscript] final_invalid_skip_breakdown', {
+            page: 'home',
+            reason: transcriptCheck.reason,
+            transcript: transcriptCheck.cleaned.slice(0, 80),
+          });
+          console.warn('[VoiceBreakdownGuard] transcript_invalid_skip_generate_tasks', {
+            page: 'home',
+            reason: transcriptCheck.reason,
+          });
+          showVoiceTranscriptHint('home');
+          return;
+        }
+        console.log('[VoiceBreakdownGuard] transcript_valid_continue', {
+          page: 'home',
+          transcript: transcriptCheck.cleaned.slice(0, 80),
+        });
+      }
       await applyInteraction(interaction, userText);
       playAudioFromBase64(payload?.data?.audio?.base64, payload?.data?.audio?.format);
     } finally {
@@ -1755,14 +1923,21 @@ const App: React.FC = () => {
           return;
         }
         if (interaction?.type === 'breakdown') {
+          const renderBreakdownAboveBoard = !isInitialTaskLocked;
           if (interaction?.audio_text) {
             const assistantText = sanitizeText(interaction.audio_text);
-            if (!isInitialTaskLocked) {
+            if (renderBreakdownAboveBoard) {
               setChatUserText(cleaned);
               setChatAssistantText(assistantText);
+            } else {
+              appendTaskMessage('assistant', assistantText);
+            }
+            if (!isInitialTaskLocked) {
               setIsInitialTaskLocked(true);
             }
-            appendTaskMessage('assistant', assistantText);
+            console.log(`[BreakdownLayout] ${renderBreakdownAboveBoard ? 'render_assistant_above_board' : 'render_assistant_below_board'}`, {
+              source: 'task_text_breakdown',
+            });
               try {
                 const snippet = String(interaction.audio_text ?? '').replace(/\s+/g, ' ').slice(0, 80);
                 const source = 'task_breakdown';
@@ -1826,22 +2001,63 @@ const App: React.FC = () => {
       const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
       const interaction = payload?.data?.interaction;
       const shouldArchive = isInitialTaskLocked;
+      if (interaction?.type === 'breakdown') {
+        const transcriptCheck = assessVoiceTranscript(userText);
+        console.log('[VoiceBreakdownGuard] transcript=', {
+          page: 'task',
+          transcript: transcriptCheck.cleaned.slice(0, 80),
+          reason: transcriptCheck.reason,
+        });
+        if (!transcriptCheck.usable) {
+          console.warn('[VoiceTranscript] final_invalid_skip_breakdown', {
+            page: 'task',
+            reason: transcriptCheck.reason,
+            transcript: transcriptCheck.cleaned.slice(0, 80),
+          });
+          console.warn('[VoiceBreakdownGuard] transcript_invalid_skip_generate_tasks', {
+            page: 'task',
+            reason: transcriptCheck.reason,
+          });
+          showVoiceTranscriptHint('task');
+          return;
+        }
+        console.log('[VoiceBreakdownGuard] transcript_valid_continue', {
+          page: 'task',
+          transcript: transcriptCheck.cleaned.slice(0, 80),
+        });
+      }
       if (interaction?.type === 'command') {
         await applyInteraction(interaction, userText);
         return;
       }
+      const isBreakdownVoice = interaction?.type === 'breakdown';
+      const renderBreakdownAboveBoard = isBreakdownVoice && !isInitialTaskLocked;
       if (userText) {
         if (!isInitialTaskLocked) {
           setChatUserText(userText);
         }
-        appendTaskMessage('user', userText);
+        if (!renderBreakdownAboveBoard) {
+          appendTaskMessage('user', userText);
+        } else {
+          console.log('[BreakdownDedup] skip_duplicate_user_append', {
+            source: 'upload_voice_breakdown',
+          });
+        }
       }
       if (assistantText) {
         if (!isInitialTaskLocked) {
           setChatAssistantText(assistantText);
+        }
+        if (!isInitialTaskLocked) {
           setIsInitialTaskLocked(true);
         }
-        appendTaskMessage('assistant', assistantText);
+        if (!renderBreakdownAboveBoard) {
+          appendTaskMessage('assistant', assistantText);
+        } else {
+          console.log('[BreakdownLayout] render_assistant_above_board', {
+            source: 'task_voice_breakdown_fallback',
+          });
+        }
       }
       if (interaction?.type === 'breakdown' && userText) {
         await generateTasks(userText, shouldArchive);
@@ -2165,7 +2381,13 @@ const App: React.FC = () => {
     let interactionHandled = false;
     let focusTranscriptHandled = false;
     let finalTranscript = '';
+    let latestNonemptyPartialAsr = '';
+    let latestUsablePartialAsr = '';
     let pendingFocusEndAfterReply = false;
+    let breakdownStreamStarted = false;
+    let pendingBreakdownInteraction: { interaction: any; userText: string } | null = null;
+    const taskWasLockedAtStart = isInitialTaskLocked;
+    const shouldRenderTaskFollowupBelowBoard = page === 'task' && taskWasLockedAtStart;
     let taskUserCommitted = false;
     let taskAssistantMessageId: string | null = null;
     let queuedInteractionSpeech: { text: string; source: string } | null = null;
@@ -2187,16 +2409,21 @@ const App: React.FC = () => {
       }, 120);
     };
     const commitTaskUserMessage = (text: string) => {
-      if (page !== 'task' || taskUserCommitted) return;
+      const canRenderOnTaskPage = page === 'task' || Boolean(pendingBreakdownInteraction);
+      if (!canRenderOnTaskPage || taskUserCommitted) return;
       const cleaned = sanitizeText(text);
       if (!cleaned) return;
       appendTaskMessage('user', cleaned);
       taskUserCommitted = true;
     };
     const ensureTaskAssistantMessage = () => {
-      if (page !== 'task') return null;
+      const canRenderOnTaskPage = page === 'task' || Boolean(pendingBreakdownInteraction);
+      if (!canRenderOnTaskPage) return null;
       if (!taskAssistantMessageId) {
         taskAssistantMessageId = appendTaskMessage('assistant', '');
+        if (pendingBreakdownInteraction) {
+          console.log('[BreakdownDedup] create_stream_bubble', { id: taskAssistantMessageId, page, turnId });
+        }
       }
       return taskAssistantMessageId;
     };
@@ -2228,6 +2455,89 @@ const App: React.FC = () => {
       if (page !== 'focus' || !pendingFocusEndAfterReply) return;
       pendingFocusEndAfterReply = false;
       handleEndFocus();
+    };
+    const applyPendingBreakdownResult = async (reason: string) => {
+      if (!pendingBreakdownInteraction) return false;
+      const nextBreakdown = pendingBreakdownInteraction;
+      const transcriptCheck = assessVoiceTranscript(nextBreakdown.userText);
+      console.log('[VoiceBreakdownGuard] transcript=', {
+        page,
+        turnId,
+        transcript: transcriptCheck.cleaned.slice(0, 80),
+        reason: transcriptCheck.reason,
+      });
+      if (!transcriptCheck.usable) {
+        pendingBreakdownInteraction = null;
+        interactionHandled = true;
+        console.warn('[VoiceTranscript] final_invalid_skip_breakdown', {
+          page,
+          turnId,
+          reason: transcriptCheck.reason,
+          transcript: transcriptCheck.cleaned.slice(0, 80),
+        });
+        console.warn('[VoiceBreakdownGuard] transcript_invalid_skip_generate_tasks', {
+          page,
+          turnId,
+          reason: transcriptCheck.reason,
+        });
+        if (taskAssistantMessageId) {
+          updateTaskMessage(taskAssistantMessageId, VOICE_TRANSCRIPT_HINT);
+        } else {
+          showVoiceTranscriptHint(page === 'focus' ? 'focus' : (page === 'task' ? 'task' : 'home'));
+        }
+        return false;
+      }
+      console.log('[VoiceBreakdownGuard] transcript_valid_continue', {
+        page,
+        turnId,
+        transcript: transcriptCheck.cleaned.slice(0, 80),
+      });
+      pendingBreakdownInteraction = null;
+      interactionHandled = true;
+      const streamedText = sanitizeText(assistantBuffer);
+      const finalizedAssistantText = sanitizeText(
+        streamedText || String(nextBreakdown.interaction?.audio_text ?? ''),
+      );
+      const interactionForUi = streamedText
+        ? { ...nextBreakdown.interaction, audio_text: streamedText }
+        : nextBreakdown.interaction;
+      if (taskAssistantMessageId && finalizedAssistantText) {
+        updateTaskMessage(taskAssistantMessageId, finalizedAssistantText);
+        assistantBuffer = finalizedAssistantText;
+        console.log('[BreakdownDedup] finalize_stream_bubble', {
+          id: taskAssistantMessageId,
+          page,
+          turnId,
+          reason,
+        });
+      }
+      console.log('[VoiceBreakdownStream] apply_breakdown_result', {
+        page,
+        turnId,
+        reason,
+        hasStreamText: Boolean(streamedText),
+      });
+      console.log('[BreakdownDedup] apply_breakdown_payload', { page, turnId, reason });
+      try {
+        await applyInteraction(
+          interactionForUi,
+          nextBreakdown.userText,
+          page === 'task'
+            ? {
+              archiveExisting: taskWasLockedAtStart,
+              skipAssistantBubble: Boolean(taskAssistantMessageId),
+            }
+            : { skipAssistantBubble: Boolean(taskAssistantMessageId) },
+        );
+        console.log('[VoiceBreakdownStream] todo_updated', { page, turnId });
+        console.log('[BreakdownDedup] todo_updated', { page, turnId });
+        console.log('[VoiceBreakdownStream] page_switched_to_task', { from: page, turnId });
+        console.log('[BreakdownDedup] page_switched_to_task', { from: page, turnId });
+        return true;
+      } catch (error) {
+        console.warn(`${logTag} breakdown_apply_failed`, error);
+        return false;
+      }
     };
     const fallbackToUploadVoice = (reason: string) => {
       if (!useUi) return;
@@ -2288,7 +2598,12 @@ const App: React.FC = () => {
         endThinking();
       };
       if (useUi) {
-        setChatAssistantText('');
+        const preserveTaskTopBubbles = page === 'task' && taskWasLockedAtStart;
+        if (!preserveTaskTopBubbles) {
+          setChatAssistantText('');
+        } else {
+          console.log('[VoiceTaskInput] preserve_existing_task_assistant_text', { page });
+        }
         if (page === 'home') {
           setHomeChatBubble('');
         } else if (page === 'focus') {
@@ -2771,6 +3086,14 @@ const App: React.FC = () => {
     socket.addEventListener('close', (event) => {
       if (wsAudioStateRef.current.id !== runId) return;
       const closeReason = event?.reason || 'socket_close';
+      if (pendingBreakdownInteraction) {
+        console.warn('[VoiceBreakdownStream] socket_closed_before_apply', {
+          page,
+          turnId,
+          reason: closeReason,
+        });
+        void applyPendingBreakdownResult('socket_close');
+      }
       console.log(`${logTag} closed`, {
         turnId,
         code: event?.code,
@@ -2860,28 +3183,54 @@ const App: React.FC = () => {
         const asrText = String(payload?.text ?? '').trim();
         const isFinal = payload?.phase === 'final';
         const noisyPartial = isNoisyPartial(asrText);
+        if (asrText) {
+          latestNonemptyPartialAsr = asrText;
+          console.log('[VoiceTranscript] partial_asr=', asrText);
+        }
+        if (asrText && !noisyPartial) {
+          latestUsablePartialAsr = asrText;
+        }
         if (isFinal) {
           console.log('[ws-audio] final_asr_ms', Math.round(performance.now() - requestStart));
         }
         if (useUi) {
           if (isFinal) {
-            const nextFinalText = (!noisyPartial && asrText) ? asrText : lastStableAsrText;
+            const nextFinalText = (!noisyPartial && asrText)
+              ? asrText
+              : (latestUsablePartialAsr || latestNonemptyPartialAsr || lastStableAsrText);
             if (nextFinalText) {
-              setChatUserText(nextFinalText);
+              if (!shouldRenderTaskFollowupBelowBoard) {
+                setChatUserText(nextFinalText);
+              }
               lastStableAsrText = nextFinalText;
             }
           } else if (asrText && !noisyPartial) {
-            setChatUserText(asrText);
+            if (!shouldRenderTaskFollowupBelowBoard) {
+              setChatUserText(asrText);
+            }
             lastStableAsrText = asrText;
           } else if (asrText && noisyPartial) {
             console.log('[ws-audio] partial_asr_suppressed', { text: asrText });
           }
         }
         const effectiveText = isFinal
-          ? ((asrText && !noisyPartial) ? asrText : lastStableAsrText)
+          ? (((asrText && !noisyPartial) ? asrText : '') || latestUsablePartialAsr || latestNonemptyPartialAsr || lastStableAsrText)
           : '';
         if (isFinal && effectiveText) {
           finalTranscript = effectiveText;
+          if ((asrText && !noisyPartial) && effectiveText === asrText) {
+            console.log('[VoiceTranscript] final_from_complete=', {
+              page,
+              turnId,
+              text: effectiveText.replace(/\s+/g, ' ').slice(0, 80),
+            });
+          } else {
+            console.log('[VoiceTranscript] fallback_to_partial_final=', {
+              page,
+              turnId,
+              text: effectiveText.replace(/\s+/g, ' ').slice(0, 80),
+            });
+          }
           console.log(`${logTag} final_asr`, {
             turnId,
             text: effectiveText.replace(/\s+/g, ' ').slice(0, 80),
@@ -2893,7 +3242,6 @@ const App: React.FC = () => {
         return;
       }
       if (payload?.type === 'interaction') {
-        interactionHandled = true;
         const interaction = payload?.interaction;
         const userText = sanitizeText(String(payload?.user_text ?? finalTranscript ?? ''));
         console.log(`${logTag} interaction_received`, {
@@ -2901,16 +3249,65 @@ const App: React.FC = () => {
           type: interaction?.type,
           userText: userText.slice(0, 80),
         });
-        if (page === 'task' && interaction?.type === 'breakdown') {
+        if (page === 'task' && shouldRenderTaskFollowupBelowBoard && userText) {
           commitTaskUserMessage(userText);
-          const assistantText = sanitizeText(String(interaction?.audio_text ?? ''));
-          if (assistantText) {
-            appendTaskMessage('assistant', assistantText);
-          }
+          console.log('[VoiceTaskInput] transcript_committed_from_interaction', {
+            page,
+            turnId,
+            type: interaction?.type,
+            text: userText.slice(0, 80),
+          });
         }
+        if (interaction?.type === 'breakdown' && payload?.defer_apply) {
+          pendingBreakdownInteraction = { interaction, userText };
+          breakdownStreamStarted = false;
+          const renderBreakdownAboveBoard = !shouldRenderTaskFollowupBelowBoard;
+          console.log('[BreakdownDedup] structured_breakdown_received', {
+            page,
+            turnId,
+            userText: userText.slice(0, 80),
+          });
+          const breakdownTitle = sanitizeText(
+            String(interaction?.ui_payload?.content?.title ?? userText ?? '任务拆解'),
+          );
+          if (breakdownTitle) {
+            setTaskTitle(breakdownTitle);
+          }
+          if (userText && renderBreakdownAboveBoard) {
+            setChatUserText(userText);
+          }
+          if (renderBreakdownAboveBoard) {
+            setChatAssistantText('');
+          }
+          if (page !== 'task') {
+            wsAudioStateRef.current.page = 'task';
+            setCurrentView('task');
+            console.log('[VoiceBreakdownStream] page_switched_to_task_stream', {
+              from: page,
+              turnId,
+            });
+          }
+          console.log('[VoiceBreakdownStream] final_transcript', {
+            page,
+            turnId,
+            text: userText.slice(0, 80),
+          });
+          console.log('[VoiceBreakdownStream] intent=breakdown', {
+            page,
+            turnId,
+            userText: userText.slice(0, 80),
+          });
+          console.log('[VoiceBreakdownStream] enable_tts_for_breakdown', { page, turnId });
+          return;
+        }
+        interactionHandled = true;
         try {
           await applyInteraction(interaction, userText);
-          queueInteractionSpeech(interaction);
+          if (interaction?.type === 'breakdown') {
+            console.log('[VoiceBreakdownStream] enable_tts_for_breakdown', { page, turnId, source: 'immediate_interaction' });
+          } else {
+            queueInteractionSpeech(interaction);
+          }
         } catch (error) {
           console.warn(`${logTag} interaction_apply_failed`, error);
         }
@@ -2923,21 +3320,53 @@ const App: React.FC = () => {
           console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
         }
         const fragment = String(payload.text ?? '');
+        const isBreakdownStream = payload?.source === 'breakdown_stream';
+        if (isBreakdownStream && !breakdownStreamStarted) {
+          breakdownStreamStarted = true;
+          console.log('[VoiceBreakdownStream] start_stream_text', { page, turnId });
+        }
         assistantBuffer += fragment;
         console.log('[ws-audio] partial_text', fragment);
+        if (isBreakdownStream) {
+          console.log('[VoiceBreakdownStream] stream_chunk', {
+            page,
+            turnId,
+            chunk: fragment,
+          });
+        }
         if (useUi) {
-          setChatAssistantText(assistantBuffer);
-          if (page === 'home') {
+          const renderBreakdownAboveBoard = isBreakdownStream
+            && Boolean(pendingBreakdownInteraction)
+            && !shouldRenderTaskFollowupBelowBoard;
+          if (!shouldRenderTaskFollowupBelowBoard) {
+            setChatAssistantText(assistantBuffer);
+          }
+          if (page === 'home' && !renderBreakdownAboveBoard) {
             setHomeChatBubble(wrapTextByWidth(assistantBuffer));
-          } else if (page === 'task') {
-            if (finalTranscript) {
+          } else if (page === 'task' || renderBreakdownAboveBoard) {
+            const reuseTopUserBubble = renderBreakdownAboveBoard;
+            if (finalTranscript && !reuseTopUserBubble) {
               commitTaskUserMessage(finalTranscript);
+            } else if (finalTranscript && reuseTopUserBubble) {
+              console.log('[BreakdownDedup] skip_duplicate_user_append', {
+                source: 'voice_breakdown_stream',
+                page,
+                turnId,
+              });
             }
-            const assistantId = ensureTaskAssistantMessage();
-            if (assistantId) {
-              updateTaskMessage(assistantId, assistantBuffer);
+            if (!renderBreakdownAboveBoard) {
+              const assistantId = ensureTaskAssistantMessage();
+              if (assistantId) {
+                updateTaskMessage(assistantId, assistantBuffer);
+              }
+            } else {
+              console.log('[BreakdownLayout] render_assistant_above_board', {
+                source: 'voice_breakdown_stream',
+                page,
+                turnId,
+              });
             }
-            if (!isInitialTaskLocked) {
+            if (!isBreakdownStream && !isInitialTaskLocked) {
               setIsInitialTaskLocked(true);
             }
           } else if (page === 'focus') {
@@ -3067,6 +3496,18 @@ const App: React.FC = () => {
           reason: payload?.reason,
           pendingAudio: audioQueue.size,
         });
+        if (!finalTranscript) {
+          const fallbackTranscript = latestUsablePartialAsr || latestNonemptyPartialAsr;
+          if (fallbackTranscript) {
+            finalTranscript = fallbackTranscript;
+            console.log('[VoiceTranscript] fallback_to_partial_final=', {
+              page,
+              turnId,
+              stage: 'done',
+              text: fallbackTranscript.replace(/\s+/g, ' ').slice(0, 80),
+            });
+          }
+        }
         wsAudioStateRef.current.ttsDone = true;
         clearWatchdog();
         if (
@@ -3085,6 +3526,9 @@ const App: React.FC = () => {
           } catch (error) {
             console.warn(`${logTag} focus_transcript_apply_failed`, error);
           }
+        }
+        if (payload?.reason === 'breakdown_stream') {
+          await applyPendingBreakdownResult('done');
         }
         if (audioQueue.size > 0) {
           const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
@@ -3131,14 +3575,23 @@ const App: React.FC = () => {
         if (payload?.message === 'empty_asr_text') {
           console.warn('[ws-audio] empty_asr_detected');
         }
-        if (useUi && payload?.message === 'empty_asr_text') {
-          const hint = '刚才没听清楚，请再试一次。';
-          setChatAssistantText(hint);
-          if (page === 'home') {
-            setHomeChatBubble(wrapTextByWidth(hint));
-          } else if (page === 'focus') {
-            setSpeechBubble(hint);
-          }
+        if (payload?.message === 'invalid_voice_transcript') {
+          console.warn('[VoiceTranscript] final_invalid_skip_breakdown', {
+            page,
+            turnId,
+            reason: payload?.reason || 'invalid_voice_transcript',
+          });
+        }
+        if (useUi && (payload?.message === 'empty_asr_text' || payload?.message === 'invalid_voice_transcript')) {
+          showVoiceTranscriptHint(page);
+        }
+        if (pendingBreakdownInteraction) {
+          console.warn('[VoiceBreakdownStream] stream_failed_use_deferred_result', {
+            page,
+            turnId,
+            message: payload?.message,
+          });
+          await applyPendingBreakdownResult('stream_error');
         }
         allowEnd = false;
         endThinkingOnce();
@@ -3162,7 +3615,11 @@ const App: React.FC = () => {
       wsAudioStateRef.current.pendingAudio = 0;
       wsAudioStateRef.current.ttsDone = false;
       console.warn('[ws-audio] socket_error', event);
-      if (useUi && !recorderStarted) {
+      if (pendingBreakdownInteraction) {
+        console.warn('[VoiceBreakdownStream] socket_error_use_deferred_result', { page, turnId });
+        void applyPendingBreakdownResult('socket_error_event');
+      }
+      if (useUi && !recorderStarted && !pendingBreakdownInteraction) {
         fallbackToUploadVoice('socket_error');
       }
       if (socket.readyState === WebSocket.OPEN) {
@@ -3751,6 +4208,7 @@ const App: React.FC = () => {
     if (transitioning[id]) return;
     const item = todoItems.find((todo) => todo.id === id);
     if (!item) return;
+    if (!sanitizeText(item.text)) return;
     if (doneItems.some((todo) => todo.id === id)) return;
 
     setTransitioning((prev) => ({ ...prev, [id]: 'toDone' }));
@@ -3769,7 +4227,6 @@ const App: React.FC = () => {
     if (transitioning[id]) return;
     const item = doneItems.find((todo) => todo.id === id);
     if (!item) return;
-    if (todoItems.some((todo) => todo.id === id)) return;
 
     setTransitioning((prev) => ({ ...prev, [id]: 'toTodo' }));
     window.setTimeout(() => {
@@ -4100,6 +4557,9 @@ const App: React.FC = () => {
                                 board.id === activeBoardId
                                   ? restoreTodo
                                   : (itemId) => restoreBoardTodo(board.id, itemId),
+                                board.id === activeBoardId
+                                  ? updateActiveTodoText
+                                  : (itemId, text) => updateBoardTodoText(board.id, itemId, text),
                               )}
                             </React.Fragment>
                           );

@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from .dashscope_service import dashscope_service
 
-FLASH_KEYWORDS = ("闪念", "闪电")
+FLASH_KEYWORDS = ("闪念", "闪电", "提醒")
 
 ResponseType = Literal["command", "chat", "breakdown"]
 
@@ -219,3 +219,70 @@ async def stream_focus_reply(
         emitted = False
     if not emitted:
         yield _focus_fallback_text(purpose)
+
+
+def _chunk_text_for_stream(text: str, chunk_size: int = 6) -> List[str]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return []
+    return [cleaned[index:index + chunk_size] for index in range(0, len(cleaned), chunk_size)]
+
+
+def _build_breakdown_messages(
+    task_text: str,
+    title: str,
+    steps: List[str],
+    summary: str,
+) -> List[Dict[str, str]]:
+    system_prompt = (
+        "你是 FlowMate。用户刚通过语音让你拆解任务。"
+        "请基于已经生成好的拆解结果，用中文给出一段自然、简短、口语化的说明。"
+        "要求：保持和拆解结果一致，不要编造额外步骤；控制在50字以内；"
+        "更像边想边整理出来的引导语。"
+    )
+    steps_text = "；".join([step for step in steps if step])
+    user_content = (
+        f"原始任务：{task_text}\n"
+        f"标题：{title}\n"
+        f"步骤：{steps_text}\n"
+        f"当前总结：{summary}\n"
+        "请输出一段适合流式展示给用户的说明。"
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+
+async def stream_breakdown_reply(
+    task_text: str,
+    interaction: Dict,
+    task_type: str = "stream_breakdown_voice",
+) -> AsyncIterator[str]:
+    ui_payload = interaction.get("ui_payload") or {}
+    content = ui_payload.get("content") or {}
+    title = str(content.get("title") or task_text or "任务拆解").strip()
+    steps = [str(step).strip() for step in (content.get("steps") or []) if str(step).strip()]
+    summary = str(interaction.get("audio_text") or ui_payload.get("display_text") or "").strip()
+    messages = _build_breakdown_messages(task_text, title, steps, summary)
+    emitted = False
+    try:
+        for chunk in dashscope_service.stream_messages(
+            messages,
+            max_tokens=80,
+            temperature=0.6,
+            task_type=task_type,
+        ):
+            if not chunk:
+                continue
+            emitted = True
+            yield chunk
+    except Exception:
+        emitted = False
+
+    if emitted:
+        return
+
+    fallback_text = summary or f"我先帮你拆成{max(1, len(steps))}个待办，按顺序推进就好。"
+    for chunk in _chunk_text_for_stream(fallback_text):
+        yield chunk

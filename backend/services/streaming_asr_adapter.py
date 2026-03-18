@@ -13,6 +13,7 @@ import base64
 import inspect
 import os
 import json
+import re
 
 from .sensevoice_asr import sensevoice_service
 from config import settings
@@ -25,6 +26,23 @@ except Exception:
     dashscope = None
     Recognition = None
     DASHSCOPE_STREAM_AVAILABLE = False
+
+
+VOICE_PARTIAL_FILLER_RE = re.compile(r"^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧|好的|好啊|好呀|好呢|嗯嗯|啊啊|哦哦|诶诶|欸欸|哎呀)+$")
+
+
+def _is_usable_partial_text(text: Optional[str]) -> bool:
+    cleaned = " ".join(str(text or "").split()).strip()
+    if not cleaned:
+        return False
+    compact = re.sub(r"[\s，。！？、,.!?;；:：'\"“”‘’（）()【】\[\]<>《》]", "", cleaned)
+    if not compact:
+        return False
+    if len(compact) < 2:
+        return False
+    if VOICE_PARTIAL_FILLER_RE.fullmatch(compact):
+        return False
+    return True
 
 
 def _infer_extension(mime_type: Optional[str]) -> str:
@@ -289,6 +307,7 @@ class StreamingAsrSession:
         self.stream_failed = False
         self.stream_attempted = False
         self.last_partial_text = ""
+        self.last_usable_partial_text = ""
         self.final_text: Optional[str] = None
         self.final_sent = False
         self._partial_results: List[Dict[str, str]] = []
@@ -432,6 +451,8 @@ class StreamingAsrSession:
             f"label={label or 'unknown'} source={source} text={text[:200]}"
         )
         self.last_partial_text = text
+        if _is_usable_partial_text(text):
+            self.last_usable_partial_text = text
         if self.first_partial_at is None:
             self.first_partial_at = time.perf_counter()
             first_partial_ms = int((self.first_partial_at - self.start_at) * 1000)
@@ -886,15 +907,29 @@ class StreamingAsrAdapter:
             return {"status": "empty", "text": ""}
 
         session.stop_stream()
-        if session.final_text or session.last_partial_text:
-            text = (session.final_text or session.last_partial_text or "").strip()
+        stream_final_text = (session.final_text or "").strip()
+        usable_stream_final = stream_final_text if _is_usable_partial_text(stream_final_text) else ""
+        usable_partial_text = (session.last_usable_partial_text or "").strip()
+        last_partial_text = (session.last_partial_text or "").strip()
+        if stream_final_text or usable_partial_text or last_partial_text:
+            text = usable_stream_final or usable_partial_text or stream_final_text or last_partial_text
             if text:
+                transcript_source = "stream_final"
+                if text == usable_partial_text and usable_partial_text and text != usable_stream_final:
+                    transcript_source = "stream_partial_fallback"
+                    print(
+                        f"[VoiceTranscript] fallback_to_partial_final={text[:120]} "
+                        f"turn_id={turn_id}"
+                    )
+                elif text == last_partial_text and last_partial_text and text != usable_stream_final:
+                    transcript_source = "stream_last_partial"
                 print(f"[ws] asr_session_end turn_id={turn_id} status=stream_success")
                 return {
                     "status": "success",
                     "text": text,
                     "emotion": "neutral",
                     "source": "asr_stream",
+                    "transcript_source": transcript_source,
                     "final_already_sent": session.final_sent,
                 }
 
@@ -948,6 +983,7 @@ class StreamingAsrAdapter:
                 "text": text,
                 "emotion": result.get("emotion", "neutral"),
                 "source": "asr_fallback",
+                "transcript_source": "fallback_service",
                 "final_already_sent": False,
             }
 
@@ -958,6 +994,7 @@ class StreamingAsrAdapter:
             "text": "",
             "error": result.get("error") or {"code": "asr_empty", "message": "ASR returned empty text"},
             "source": "asr_fallback",
+            "transcript_source": "fallback_service_empty",
             "final_already_sent": False,
         }
 
