@@ -8,6 +8,7 @@ from typing import Optional, List
 import httpx
 from config import settings
 from .prompt_templates import PromptTemplates
+from demo_task_breakdown import get_demo_task_breakdown
 
 
 class AgentBrain:
@@ -62,6 +63,10 @@ class AgentBrain:
         return self.prompts.PRESET_TASK_RESPONSES["default"]["steps"]
 
     async def generate_task_breakdown(self, task_description: str) -> List[str]:
+        demo_breakdown = get_demo_task_breakdown(task_description)
+        if demo_breakdown:
+            return list(demo_breakdown.steps)
+
         if self.use_preset:
             preset = self._get_preset_tasks(task_description)
             if preset:
@@ -100,6 +105,10 @@ class AgentBrain:
         raise RuntimeError("LLM task breakdown unavailable")
 
     async def generate_task_topic(self, task_description: str, steps: List[str]) -> str:
+        demo_breakdown = get_demo_task_breakdown(task_description)
+        if demo_breakdown:
+            return demo_breakdown.title
+
         messages = [
             {
                 "role": "system",

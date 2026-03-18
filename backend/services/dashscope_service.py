@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Iterator
 from dashscope import Generation
 from dashscope.api_entities.dashscope_response import GenerationResponse
 from config import settings
+from demo_task_breakdown import get_demo_task_breakdown
 
 
 class DashScopeService:
@@ -126,6 +127,10 @@ class DashScopeService:
         Decomposition Agent - 任务拆解
         将大任务拆解为 3 个可执行的微步骤
         """
+        demo_breakdown = get_demo_task_breakdown(task)
+        if demo_breakdown:
+            return list(demo_breakdown.steps)
+
         system_prompt = """你是一个任务拆解专家。你的唯一工作是把用户的大任务拆解成 3 个具体可执行的微步骤。
 
 【强制输出格式】
@@ -186,6 +191,9 @@ class DashScopeService:
         text = (user_text or "").strip()
         if not text:
             return "chat"
+
+        if get_demo_task_breakdown(text):
+            return "breakdown"
 
         system_prompt = (
             "你是一个意图路由器，只能输出 JSON："
@@ -253,6 +261,10 @@ class DashScopeService:
 
     def summarize_breakdown(self, task: str, steps: List[str]) -> str:
         """Summarize breakdown into a short, spoken suggestion."""
+        demo_breakdown = get_demo_task_breakdown(task)
+        if demo_breakdown:
+            return demo_breakdown.summary
+
         if not steps:
             return "我已经帮你拆解了一下，我们先从第一步开始吧。"
 
@@ -281,6 +293,10 @@ class DashScopeService:
 
     def summarize_title(self, task: str, steps: List[str]) -> str:
         """Summarize task into a short title (<=9 chars)."""
+        demo_breakdown = get_demo_task_breakdown(task)
+        if demo_breakdown:
+            return demo_breakdown.title
+
         system_prompt = (
             "请为任务生成一个中文标题，要求：不超过9个字符，简洁准确，"
             "不要标点，不要解释，只输出标题。"
@@ -421,6 +437,70 @@ class DashScopeService:
     ) -> Iterator[str]:
         """Stream chat reply chunks for SSE test path."""
         yield from self.chat(message, history, task_type=task_type)
+
+    def stream_messages(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 150,
+        temperature: float = 0.7,
+        task_type: Optional[str] = None,
+    ) -> Iterator[str]:
+        if not self.api_key or self.api_key == "your_dashscope_api_key_here":
+            return
+
+        def extract_text(chunk) -> str:
+            if chunk is None:
+                return ""
+            if isinstance(chunk, dict):
+                output = chunk.get("output") or {}
+            else:
+                output = getattr(chunk, "output", None) or {}
+
+            if isinstance(output, dict):
+                choices = output.get("choices") or []
+                if choices:
+                    message_obj = choices[0].get("message") or {}
+                    content = message_obj.get("content")
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                                return item.get("text") or ""
+
+                if isinstance(output.get("text"), str):
+                    return output.get("text") or ""
+
+            return ""
+
+        model = self.choose_model(task_type)
+        try:
+            response = Generation.call(
+                model=model,
+                api_key=self.api_key,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                result_format="message",
+                stream=True,
+            )
+        except Exception as e:
+            print(f"DashScope stream call error: {e}")
+            raise
+
+        full_text = ""
+        for chunk in response:
+            text = extract_text(chunk)
+            if not text:
+                continue
+            if full_text and text.startswith(full_text):
+                delta = text[len(full_text):]
+                full_text = text
+            else:
+                delta = text
+                full_text += text
+            if delta:
+                yield delta
 
     def generate_reply_from_asr(self, user_text: str, user_emotion: str) -> str:
         """

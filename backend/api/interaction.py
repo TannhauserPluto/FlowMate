@@ -6,7 +6,7 @@ Interaction-related routes
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, AsyncIterator, Callable, Dict, Any
 from pathlib import Path
 from datetime import datetime
 import base64
@@ -20,9 +20,13 @@ try:
 except Exception:  # pragma: no cover - fallback for older environments
     ZoneInfo = None
 
-from core import agent_brain, flow_manager
+from core import agent_brain, flow_manager, focus_session_manager
+from demo_task_breakdown import (
+    DEMO_TASK_BREAKDOWN_DELAY_SECONDS,
+    get_demo_task_breakdown,
+)
 from services import audio_service, voice_pipeline_service
-from services.interaction_service import process_user_intent, stream_chat_reply
+from services.interaction_service import process_user_intent, stream_chat_reply, stream_focus_reply
 from services.streaming_asr_adapter import StreamingAsrAdapter
 
 router = APIRouter()
@@ -102,6 +106,8 @@ class IntentRequest(BaseModel):
 async def generate_tasks(request: TaskGenerationRequest):
     """Generate task breakdown."""
     try:
+        if get_demo_task_breakdown(request.task_description):
+            await asyncio.sleep(DEMO_TASK_BREAKDOWN_DELAY_SECONDS)
         tasks = await agent_brain.generate_task_breakdown(request.task_description)
         topic = await agent_brain.generate_task_topic(request.task_description, tasks)
         return TaskGenerationResponse(
@@ -278,10 +284,95 @@ async def interaction_ws(websocket: WebSocket):
     audio_buffers = {}
     turn_modes = {}
     turn_tokens = {}
+    turn_pages = {}
+    turn_contexts = {}
     ended_turns = set()
 
     async def send(payload: dict) -> None:
         await websocket.send_text(json.dumps(payload, ensure_ascii=True))
+
+    def parse_focus_rest_decision(text: str) -> Optional[bool]:
+        normalized = "".join(str(text or "").split())
+        if not normalized:
+            return None
+        if any(token in normalized for token in ("不用", "不想", "继续", "不休息", "先不")):
+            return False
+        if any(token in normalized for token in ("好", "休息", "可以", "行", "嗯", "要", "好的")):
+            return True
+        return None
+
+    async def build_focus_voice_turn(
+        transcript: str,
+        emotion: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_text = (transcript or "").strip()
+        if any(keyword in normalized_text for keyword in ("闪念", "闪电")):
+            interaction = await process_user_intent(normalized_text, emotion)
+            if (
+                interaction
+                and interaction.get("type") == "command"
+                and (interaction.get("ui_payload") or {}).get("command") == "save_memo"
+            ):
+                return {
+                    "mode": "interaction",
+                    "interaction": interaction,
+                    "user_text": normalized_text,
+                }
+
+        focus_context = context or {}
+        session_id = str(focus_context.get("focus_session_id") or "").strip()
+        remaining_seconds = int(focus_context.get("remaining_seconds") or 0)
+        session = focus_session_manager.get(session_id) if session_id else None
+
+        purpose = "continue"
+        tts_emotion = "neutral"
+        start_focus_monitors = False
+        end_focus_after_reply = False
+
+        if not session:
+            session = focus_session_manager.create_session(normalized_text, remaining_seconds)
+            focus_session_manager.record_message(session.id, "user", normalized_text)
+            purpose = "encourage"
+            tts_emotion = "encouraging"
+            start_focus_monitors = True
+        elif session.awaiting_rest_response:
+            decision = parse_focus_rest_decision(normalized_text)
+            accept_rest = False if decision is None else decision
+            user_text = normalized_text or ("休息" if accept_rest else "继续")
+            focus_session_manager.record_message(session.id, "user", user_text)
+            session.awaiting_rest_response = False
+            if accept_rest:
+                purpose = "end_focus"
+                end_focus_after_reply = True
+            else:
+                purpose = "continue"
+        else:
+            focus_session_manager.record_message(session.id, "user", normalized_text)
+            purpose = "continue"
+
+        async def on_complete_text(reply_text: str) -> None:
+            cleaned = (reply_text or "").strip()
+            if cleaned and session:
+                focus_session_manager.record_message(session.id, "assistant", cleaned)
+
+        return {
+            "mode": "focus_stream",
+            "purpose": purpose,
+            "task_text": session.task_text if session else normalized_text,
+            "user_text": normalized_text,
+            "history": list(session.memory[-6:]) if session else [],
+            "tts_emotion": tts_emotion,
+            "focus_state": {
+                "action": "end_focus" if end_focus_after_reply else ("start_session" if start_focus_monitors else purpose),
+                "session_id": session.id if session else None,
+                "task_text": session.task_text if session else normalized_text,
+                "awaiting_rest_response": bool(session.awaiting_rest_response) if session else False,
+                "start_focus_monitors": start_focus_monitors,
+                "end_focus_after_reply": end_focus_after_reply,
+            },
+            "on_complete_text": on_complete_text,
+        }
 
     async def stream_llm_sequence(
         turn_token: int,
@@ -291,6 +382,8 @@ async def interaction_ws(websocket: WebSocket):
         enable_tts: bool = False,
         tts_emotion: str = "neutral",
         task_type: str = "stream_chat",
+        chunk_stream: Optional[AsyncIterator[str]] = None,
+        on_complete_text: Optional[Callable[[str], Any]] = None,
     ) -> None:
         # WS early-audio incremental TTS path (sentence-buffered, post-LLM streaming)
         first_partial_logged = False
@@ -305,6 +398,7 @@ async def interaction_ws(websocket: WebSocket):
         first_tts_logged = False
         first_tts_sentence_logged = False
         first_audio_sent_logged = False
+        full_text = ""
         print(
             "[ws] llm_stream_start_ms="
             f"{int((start - connection_start) * 1000)} turn_id={turn_id} source={source_label}"
@@ -400,11 +494,13 @@ async def interaction_ws(websocket: WebSocket):
 
                 tts_task = asyncio.create_task(tts_worker())
 
-            async for chunk in stream_chat_reply(prompt_text, task_type=task_type):
+            text_stream = chunk_stream or stream_chat_reply(prompt_text, task_type=task_type)
+            async for chunk in text_stream:
                 if turn_token != current_turn_token:
                     return
                 if chunk:
                     has_any_text = True
+                    full_text += chunk
                     if not first_partial_logged:
                         first_partial_logged = True
                         elapsed = int((time.perf_counter() - start) * 1000)
@@ -471,6 +567,12 @@ async def interaction_ws(websocket: WebSocket):
                 if tts_failed:
                     return
 
+            completed_text = full_text.strip()
+            if completed_text and on_complete_text is not None:
+                maybe_result = on_complete_text(completed_text)
+                if asyncio.iscoroutine(maybe_result):
+                    await maybe_result
+
             await send({
                 "type": "done",
                 "turn_id": turn_id,
@@ -483,6 +585,8 @@ async def interaction_ws(websocket: WebSocket):
             audio_buffers.pop(turn_id, None)
             turn_modes.pop(turn_id, None)
             turn_tokens.pop(turn_id, None)
+            turn_pages.pop(turn_id, None)
+            turn_contexts.pop(turn_id, None)
             asr_adapter.close_session(turn_id, reason="llm_done")
         except asyncio.CancelledError:
             if tts_task is not None:
@@ -504,6 +608,8 @@ async def interaction_ws(websocket: WebSocket):
                 audio_buffers.pop(turn_id, None)
                 turn_modes.pop(turn_id, None)
                 turn_tokens.pop(turn_id, None)
+                turn_pages.pop(turn_id, None)
+                turn_contexts.pop(turn_id, None)
                 asr_adapter.close_session(turn_id, reason="llm_error")
 
     def log_unknown_turn(stage: str, turn_id: Optional[str], reason: str) -> None:
@@ -537,6 +643,8 @@ async def interaction_ws(websocket: WebSocket):
                     audio_buffers.pop(active_turn_id, None)
                     turn_modes.pop(active_turn_id, None)
                     turn_tokens.pop(active_turn_id, None)
+                    turn_pages.pop(active_turn_id, None)
+                    turn_contexts.pop(active_turn_id, None)
                 active_turn_id = payload.get("turn_id") or f"turn-{turn_token}"
                 await send({
                     "type": "ack",
@@ -556,8 +664,12 @@ async def interaction_ws(websocket: WebSocket):
                 asr_adapter.start_session(active_turn_id)
                 turn_tokens[active_turn_id] = turn_token
                 mode = (payload.get("mode") or "text").strip().lower()
+                page = (payload.get("page") or "home").strip().lower()
+                context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
                 turn_modes[active_turn_id] = mode
-                print(f"[ws] turn_start turn_id={active_turn_id} mode={mode}")
+                turn_pages[active_turn_id] = page
+                turn_contexts[active_turn_id] = context
+                print(f"[ws] turn_start turn_id={active_turn_id} mode={mode} page={page}")
                 prompt_text = (payload.get("text") or "").strip()
                 if mode != "audio":
                     if not prompt_text:
@@ -575,6 +687,8 @@ async def interaction_ws(websocket: WebSocket):
                         asr_adapter.close_session(active_turn_id, reason="empty_text")
                         turn_modes.pop(active_turn_id, None)
                         turn_tokens.pop(active_turn_id, None)
+                        turn_pages.pop(active_turn_id, None)
+                        turn_contexts.pop(active_turn_id, None)
                         continue
                     sequence_task = asyncio.create_task(
                         stream_llm_sequence(
@@ -598,6 +712,8 @@ async def interaction_ws(websocket: WebSocket):
                 asr_adapter.close_session(turn_id, reason="cancel")
                 turn_modes.pop(turn_id, None)
                 turn_tokens.pop(turn_id, None)
+                turn_pages.pop(turn_id, None)
+                turn_contexts.pop(turn_id, None)
                 if turn_id:
                     print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=cancelled")
                 await send({
@@ -766,6 +882,8 @@ async def interaction_ws(websocket: WebSocket):
                     audio_buffers.pop(turn_id, None)
                     turn_modes.pop(turn_id, None)
                     turn_tokens.pop(turn_id, None)
+                    turn_pages.pop(turn_id, None)
+                    turn_contexts.pop(turn_id, None)
                     asr_adapter.close_session(turn_id, reason="not_audio")
                     continue
                 # WS streaming ASR test path (fallback on end_audio)
@@ -780,6 +898,92 @@ async def interaction_ws(websocket: WebSocket):
                             "source": asr_result.get("source", "asr_fallback"),
                             "phase": "final",
                         })
+                    page = (turn_pages.get(turn_id) or "home").strip().lower()
+                    transcript = (asr_result.get("text") or "").strip()
+                    if page in ("home", "task"):
+                        interaction = await process_user_intent(
+                            transcript,
+                            asr_result.get("emotion", "neutral"),
+                        )
+                        if interaction and interaction.get("type") in ("command", "breakdown"):
+                            await send({
+                                "type": "interaction",
+                                "turn_id": turn_id,
+                                "user_text": transcript,
+                                "interaction": interaction,
+                            })
+                            await send({
+                                "type": "done",
+                                "turn_id": turn_id,
+                                "reason": "interaction",
+                            })
+                            print(
+                                f"[ws] ws_turn_cleanup turn_id={turn_id} "
+                                f"reason=interaction type={interaction.get('type')} page={page}"
+                            )
+                            audio_buffers.pop(turn_id, None)
+                            turn_modes.pop(turn_id, None)
+                            turn_tokens.pop(turn_id, None)
+                            turn_pages.pop(turn_id, None)
+                            turn_contexts.pop(turn_id, None)
+                            asr_adapter.close_session(turn_id, reason="interaction_done")
+                            continue
+                    if page == "focus":
+                        focus_turn = await build_focus_voice_turn(
+                            transcript,
+                            asr_result.get("emotion", "neutral"),
+                            turn_contexts.get(turn_id),
+                        )
+                        if focus_turn.get("mode") == "interaction":
+                            await send({
+                                "type": "interaction",
+                                "turn_id": turn_id,
+                                "user_text": focus_turn.get("user_text") or transcript,
+                                "interaction": focus_turn.get("interaction"),
+                            })
+                            await send({
+                                "type": "done",
+                                "turn_id": turn_id,
+                                "reason": "interaction",
+                            })
+                            print(
+                                f"[ws] ws_turn_cleanup turn_id={turn_id} "
+                                "reason=interaction type=command page=focus"
+                            )
+                            audio_buffers.pop(turn_id, None)
+                            turn_modes.pop(turn_id, None)
+                            turn_tokens.pop(turn_id, None)
+                            turn_pages.pop(turn_id, None)
+                            turn_contexts.pop(turn_id, None)
+                            asr_adapter.close_session(turn_id, reason="interaction_done")
+                            continue
+                        await send({
+                            "type": "focus_state",
+                            "turn_id": turn_id,
+                            "state": focus_turn.get("focus_state") or {},
+                        })
+                        if sequence_task:
+                            sequence_task.cancel()
+                        sequence_task = asyncio.create_task(
+                            stream_llm_sequence(
+                                turn_token,
+                                turn_id,
+                                transcript,
+                                "focus_voice",
+                                enable_tts=True,
+                                tts_emotion=focus_turn.get("tts_emotion", "neutral"),
+                                task_type="stream_focus_voice",
+                                chunk_stream=stream_focus_reply(
+                                    focus_turn.get("purpose", "continue"),
+                                    task_text=focus_turn.get("task_text", ""),
+                                    user_reply=focus_turn.get("user_text", transcript),
+                                    history=focus_turn.get("history") or [],
+                                    task_type="stream_focus_voice",
+                                ),
+                                on_complete_text=focus_turn.get("on_complete_text"),
+                            )
+                        )
+                        continue
                     if sequence_task:
                         sequence_task.cancel()
                     sequence_task = asyncio.create_task(
@@ -822,6 +1026,8 @@ async def interaction_ws(websocket: WebSocket):
                     audio_buffers.pop(turn_id, None)
                     turn_modes.pop(turn_id, None)
                     turn_tokens.pop(turn_id, None)
+                    turn_pages.pop(turn_id, None)
+                    turn_contexts.pop(turn_id, None)
                 continue
 
             await send({
@@ -835,6 +1041,8 @@ async def interaction_ws(websocket: WebSocket):
         audio_buffers.clear()
         turn_modes.clear()
         turn_tokens.clear()
+        turn_pages.clear()
+        turn_contexts.clear()
         for turn_id in list(asr_adapter.sessions.keys()):
             print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=disconnect")
             asr_adapter.close_session(turn_id, reason="disconnect")

@@ -56,6 +56,10 @@ class FatigueCheckRequest(BaseModel):
     remaining_seconds: int
 
 
+class FatigueCheckOverrideRequest(BaseModel):
+    mode: str  # sleepy | none
+
+
 class FatigueCheckResponse(BaseModel):
     fatigue_level: int
     action: str  # ok | ask_rest | shorten
@@ -76,6 +80,7 @@ class FocusFinishRequest(BaseModel):
 
 
 _SCREEN_CHECK_OVERRIDE: Optional[str] = None
+_FATIGUE_CHECK_OVERRIDE: Optional[str] = None
 
 
 def _set_screen_check_override(mode: Optional[str]) -> None:
@@ -91,6 +96,22 @@ def _consume_screen_check_override() -> Optional[str]:
     if mode:
         print(f"[screen-check] override_consumed mode={mode}")
     _SCREEN_CHECK_OVERRIDE = None
+    return mode
+
+
+def _set_fatigue_check_override(mode: Optional[str]) -> None:
+    global _FATIGUE_CHECK_OVERRIDE
+    _FATIGUE_CHECK_OVERRIDE = mode
+    if mode:
+        print(f"[fatigue-check] override_set mode={mode}")
+
+
+def _consume_fatigue_check_override() -> Optional[str]:
+    global _FATIGUE_CHECK_OVERRIDE
+    mode = _FATIGUE_CHECK_OVERRIDE
+    if mode:
+        print(f"[fatigue-check] override_consumed mode={mode}")
+    _FATIGUE_CHECK_OVERRIDE = None
     return mode
 
 
@@ -244,6 +265,18 @@ async def screen_check_override(request: ScreenCheckOverrideRequest):
     return {"status": "ok", "pending_override": mode}
 
 
+@router.post("/fatigue-check-override")
+async def fatigue_check_override(request: FatigueCheckOverrideRequest):
+    mode = (request.mode or "").strip().lower()
+    if mode in ("", "none"):
+        _set_fatigue_check_override(None)
+        return {"status": "ok", "pending_override": None}
+    if mode != "sleepy":
+        raise HTTPException(status_code=400, detail="mode must be sleepy|none")
+    _set_fatigue_check_override(mode)
+    return {"status": "ok", "pending_override": mode}
+
+
 @router.post("/fatigue-check", response_model=FatigueCheckResponse)
 async def fatigue_check(request: FatigueCheckRequest):
     """Check fatigue based on blink rate (6-min interval suggested on client)."""
@@ -251,6 +284,34 @@ async def fatigue_check(request: FatigueCheckRequest):
     if not session:
         raise HTTPException(status_code=404, detail="session not found")
     focus_session_manager.update_remaining(session.id, request.remaining_seconds)
+
+    override_mode = _consume_fatigue_check_override()
+    if override_mode == "sleepy":
+        fatigue_level = 92
+        session.last_fatigue_ok = False
+        session.consecutive_fatigue = 1
+        session.awaiting_rest_response = True
+        print(
+            f"[Focus] fatigue-check override=session={request.session_id} "
+            f"mode={override_mode} level={fatigue_level}"
+        )
+        reply = await agent_brain.generate_focus_message(
+            "ask_rest",
+            task_text=session.task_text,
+            history=session.memory,
+        )
+        focus_session_manager.record_message(session.id, "assistant", reply)
+        audio = await audio_service.speak(reply, "neutral")
+        return FatigueCheckResponse(
+            fatigue_level=fatigue_level,
+            action="ask_rest",
+            reply=reply,
+            audio={
+                "base64": audio.get("audio_data", ""),
+                "format": audio.get("format", "mp3"),
+            },
+            consecutive_fatigue=session.consecutive_fatigue,
+        )
 
     metrics = fatigue_detector.detect()
     fatigue_level = int(metrics.fatigue_level)

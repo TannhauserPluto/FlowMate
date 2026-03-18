@@ -58,6 +58,17 @@ type TaskMessage = {
   text: string;
 };
 
+type VoiceWsPage = 'home' | 'task' | 'focus';
+
+type StreamingVoiceInteractionOptions = {
+  page: VoiceWsPage;
+  durationMs?: number;
+  chunkMs?: number;
+  message?: string;
+  useUi?: boolean;
+  fallbackHandler: (blob: Blob) => Promise<void> | void;
+};
+
 const DEFAULT_CHAT_USER_TEXT = '我需要写一篇关于数字媒体交互的论文';
 const DEFAULT_CHAT_ASSISTANT_TEXT =
   '根据任务难度和任务截止时间，你还有7天完成这个论文，以下是我对你的任务规划，已帮你同步到Todo-list';
@@ -108,6 +119,8 @@ const sanitizeText = (text: string) =>
     .replace(/<Speech\|>/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+const hasFlashIdeaKeyword = (text: string) =>
+  text.includes('闪念') || text.includes('闪电');
 const DEFAULT_BUBBLE_FONT =
   "400 12.183px/1.6 'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
 const DEFAULT_BUBBLE_TEXT_WIDTH = 228;
@@ -321,6 +334,7 @@ const App: React.FC = () => {
     id: number;
     socket: WebSocket | null;
     turnId: string | null;
+    page: VoiceWsPage | null;
     recorder: MediaRecorder | null;
     stream: MediaStream | null;
     pcmContext: AudioContext | null;
@@ -341,6 +355,7 @@ const App: React.FC = () => {
     id: 0,
     socket: null,
     turnId: null,
+    page: null,
     recorder: null,
     stream: null,
     pcmContext: null,
@@ -999,14 +1014,35 @@ const App: React.FC = () => {
     }
   };
 
+  const setFatigueCheckOverride = async (mode: 'sleepy') => {
+    try {
+      await fetch(`${API_BASE}/focus/fatigue-check-override`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+    } catch (error) {
+      console.warn('[fatigue-check-demo] override_set_failed', error);
+    }
+  };
+
   const triggerDemoScreenCheck = (mode: 'related' | 'unrelated') => {
     if (!DEMO_SCREEN_CHECK_SHORTCUTS) return;
-    const label = mode === 'related' ? 'ctrl+q' : 'ctrl+e';
+    const label = mode === 'related' ? 'ctrl+shift+q' : 'ctrl+e';
     console.log(`[screen-check-demo] shortcut ${label} triggered`);
     void (async () => {
       await setScreenCheckOverride(mode);
       console.log('[screen-check-demo] detection_requested', { mode });
       scheduleScreenCheck(0);
+    })();
+  };
+
+  const triggerDemoFatigueCheck = () => {
+    console.log('[fatigue-check-demo] shortcut ctrl+q triggered');
+    void (async () => {
+      await setFatigueCheckOverride('sleepy');
+      console.log('[fatigue-check-demo] detection_requested', { mode: 'sleepy' });
+      scheduleFatigueCheck(0);
     })();
   };
 
@@ -1164,7 +1200,7 @@ const App: React.FC = () => {
   const handleFocusUserText = async (text: string) => {
     const cleaned = sanitizeText(text);
     if (!cleaned) return;
-    if (cleaned.includes('闪念')) {
+    if (hasFlashIdeaKeyword(cleaned)) {
       try {
         const interaction = await requestIntent(cleaned);
         if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
@@ -1683,11 +1719,26 @@ const App: React.FC = () => {
     }
   };
 
+  const stopActiveVoiceCapture = () => {
+    if (mediaRecorderRef.current) {
+      stopRecording();
+      return;
+    }
+    stopWsAudioRecording();
+  };
+
   const handleHomeAudioClick = () => {
     if (isRecording) {
-      stopWsAudioRecording();
+      stopActiveVoiceCapture();
     } else {
-      void runWsAudioTest(0, 300, 'home_voice', true);
+      void startStreamingVoiceInteraction({
+        page: 'home',
+        durationMs: 0,
+        chunkMs: 300,
+        message: 'home_voice',
+        useUi: true,
+        fallbackHandler: sendVoiceIntent,
+      });
     }
   };
 
@@ -1803,9 +1854,16 @@ const App: React.FC = () => {
 
   const handleTaskAudioClick = () => {
     if (isRecording) {
-      stopRecording();
+      stopActiveVoiceCapture();
     } else {
-      startRecording(sendVoiceChat);
+      void startStreamingVoiceInteraction({
+        page: 'task',
+        durationMs: 0,
+        chunkMs: 300,
+        message: 'task_voice',
+        useUi: true,
+        fallbackHandler: sendVoiceChat,
+      });
     }
   };
 
@@ -2075,37 +2133,114 @@ const App: React.FC = () => {
   };
 
   // WS audio full loop test path (audio -> ASR fallback -> LLM -> chunked TTS)
-  const runWsAudioTest = async (
+  const startStreamingVoiceInteraction = async ({
+      page,
       durationMs = 3000,
       chunkMs = 300,
       message = 'ws audio test',
       useUi = false,
-    ) => {
+      fallbackHandler,
+    }: StreamingVoiceInteractionOptions) => {
+    const logTag = `[VoiceWS][${page}]`;
     if (isRecording || mediaRecorderRef.current || wsAudioStateRef.current.recorder) {
-      console.warn('[ws-audio] recording already active');
+      console.warn(`${logTag} recording_already_active`);
       return;
     }
-      const requestStart = performance.now();
-      console.log('[ws-audio] ws_audio_record_start_ms', Math.round(performance.now() - requestStart));
-      if (audioPlayerRef.current) {
-        console.log('[ws-audio] audio_player_reset', {
-          hadSrc: Boolean(audioPlayerRef.current.src),
-          paused: audioPlayerRef.current.paused,
-        });
-        audioPlayerRef.current.pause();
-        audioPlayerRef.current.currentTime = 0;
-        audioPlayerRef.current.src = '';
-      }
-      let assistantBuffer = '';
-      let thinkingStarted = false;
-      let recorderStarted = false;
-      let allowEnd = true;
-      let intentCheckInFlight = false;
-      let skipWsChat = false;
+    const requestStart = performance.now();
+    console.log(`${logTag} start`, { durationMs, chunkMs, message, useUi });
+    console.log('[ws-audio] ws_audio_record_start_ms', Math.round(performance.now() - requestStart));
+    if (audioPlayerRef.current) {
+      console.log('[ws-audio] audio_player_reset', {
+        hadSrc: Boolean(audioPlayerRef.current.src),
+        paused: audioPlayerRef.current.paused,
+      });
+      audioPlayerRef.current.pause();
+      audioPlayerRef.current.currentTime = 0;
+      audioPlayerRef.current.src = '';
+    }
+    let assistantBuffer = '';
+    let thinkingStarted = false;
+    let recorderStarted = false;
+    let allowEnd = true;
+    let interactionHandled = false;
+    let focusTranscriptHandled = false;
+    let finalTranscript = '';
+    let pendingFocusEndAfterReply = false;
+    let taskUserCommitted = false;
+    let taskAssistantMessageId: string | null = null;
+    let queuedInteractionSpeech: { text: string; source: string } | null = null;
     const watchdogMs = 30000;
+    const queueInteractionSpeech = (interaction: any) => {
+      const text = sanitizeText(String(interaction?.audio_text ?? ''));
+      if (!text) return;
+      queuedInteractionSpeech = {
+        text,
+        source: `voice_ws_${page}_${String(interaction?.type ?? 'other')}`,
+      };
+    };
+    const flushQueuedInteractionSpeech = () => {
+      if (!queuedInteractionSpeech) return;
+      const nextSpeech = queuedInteractionSpeech;
+      queuedInteractionSpeech = null;
+      window.setTimeout(() => {
+        void speakText(nextSpeech.text, nextSpeech.source, { allowDuringWs: true });
+      }, 120);
+    };
+    const commitTaskUserMessage = (text: string) => {
+      if (page !== 'task' || taskUserCommitted) return;
+      const cleaned = sanitizeText(text);
+      if (!cleaned) return;
+      appendTaskMessage('user', cleaned);
+      taskUserCommitted = true;
+    };
+    const ensureTaskAssistantMessage = () => {
+      if (page !== 'task') return null;
+      if (!taskAssistantMessageId) {
+        taskAssistantMessageId = appendTaskMessage('assistant', '');
+      }
+      return taskAssistantMessageId;
+    };
+    const applyFocusStreamState = (state: any) => {
+      if (page !== 'focus' || !state || typeof state !== 'object') return;
+      const nextSessionId = typeof state.session_id === 'string' ? state.session_id : '';
+      const nextTaskText = sanitizeText(String(state.task_text ?? ''));
+      if (nextSessionId) {
+        setFocusSessionId(nextSessionId);
+        focusSessionIdRef.current = nextSessionId;
+      }
+      if (nextTaskText) {
+        setFocusTaskText(nextTaskText);
+        focusTaskTextRef.current = nextTaskText;
+      }
+      if (typeof state.awaiting_rest_response === 'boolean') {
+        setIsAwaitingRestDecision(state.awaiting_rest_response);
+      }
+      if (state.start_focus_monitors) {
+        scheduleScreenCheck(0);
+        scheduleFatigueCheck(6 * 60 * 1000);
+      }
+      if (state.end_focus_after_reply) {
+        pendingFocusEndAfterReply = true;
+      }
+      console.log(`${logTag} focus_state_applied`, state);
+    };
+    const maybeFinishFocusAfterReply = () => {
+      if (page !== 'focus' || !pendingFocusEndAfterReply) return;
+      pendingFocusEndAfterReply = false;
+      handleEndFocus();
+    };
+    const fallbackToUploadVoice = (reason: string) => {
+      if (!useUi) return;
+      console.warn(`${logTag} fallback_to_upload`, { reason });
+      void startRecording(fallbackHandler);
+    };
     const closeWsAudio = (reason: string) => {
       const ws = wsAudioStateRef.current.socket;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      console.log(`${logTag} close_requested`, {
+        turnId: wsAudioStateRef.current.turnId,
+        reason,
+      });
       console.log('[ws-audio] ws_close_called', {
         turnId: wsAudioStateRef.current.turnId,
         reason,
@@ -2134,8 +2269,10 @@ const App: React.FC = () => {
         if (useUi) {
           const hint = '响应超时，请重试。';
           setChatAssistantText(hint);
-          if (isHomeView) {
+          if (page === 'home') {
             setHomeChatBubble(wrapTextByWidth(hint));
+          } else if (page === 'focus') {
+            setSpeechBubble(hint);
           }
         }
       }, watchdogMs);
@@ -2150,40 +2287,18 @@ const App: React.FC = () => {
       thinkingStarted = false;
         endThinking();
       };
-      const suppressWsChatForBreakdown = (reason: string) => {
-        skipWsChat = true;
-        console.log('[ws-audio] ws_chat_skipped_for_breakdown', { reason });
-        endThinkingOnce();
-        if (audioQueue.size > 0) {
-          audioQueue.clear();
-          updateAudioQueueState();
-          console.log('[ws-audio] audio_queue_cleared', { reason: 'breakdown' });
-        }
-        if (audioPlayer) {
-          audioPlayer.pause();
-          audioPlayer.currentTime = 0;
-          audioPlayer.src = '';
-          audioPlayer.dataset.source = 'other';
-          audioPlayer.dataset.wsRunId = '';
-        }
-        setAvatarSpeechState('idle');
-        wsAudioStateRef.current.turnActive = false;
-        wsAudioStateRef.current.pendingAudio = 0;
-        wsAudioStateRef.current.ttsDone = false;
-        if (socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: 'cancel_turn', turn_id: turnId }));
-          closeWsAudio('breakdown');
-        }
-      };
       if (useUi) {
         setChatAssistantText('');
-        if (isHomeView) {
+        if (page === 'home') {
           setHomeChatBubble('');
+        } else if (page === 'focus') {
+          setSpeechBubble('');
         }
-    }
+      }
 
     const runId = wsAudioStateRef.current.id + 1;
     wsAudioStateRef.current.id = runId;
+    wsAudioStateRef.current.page = page;
     wsAudioStateRef.current.stopRequested = false;
     wsAudioStateRef.current.useUi = useUi;
     wsAudioStateRef.current.turnActive = true;
@@ -2326,6 +2441,13 @@ const App: React.FC = () => {
         turn_id: turnId,
         text: message,
         mode: 'audio',
+        page,
+        context: page === 'focus'
+          ? {
+            focus_session_id: focusSessionIdRef.current,
+            remaining_seconds: remainingSecondsRef.current,
+          }
+          : undefined,
       }));
 
       let stream: MediaStream;
@@ -2334,10 +2456,7 @@ const App: React.FC = () => {
       } catch (error) {
         console.warn('[ws-audio] getUserMedia failed', error);
         closeWsAudio('mic_failed');
-        if (useUi) {
-          console.warn('[ws-audio] fallback_triggered');
-          startRecording(sendVoiceIntent);
-        }
+        fallbackToUploadVoice('mic_failed');
         return;
       }
 
@@ -2388,7 +2507,7 @@ const App: React.FC = () => {
         }
       };
 
-      const enablePcmCapture = useUi && isHomeView;
+      const enablePcmCapture = useUi;
       let pcmInitOk = false;
       const pcmChunkSize = 1024;
       const pcmSendTargetFrames = 1600;
@@ -2652,6 +2771,11 @@ const App: React.FC = () => {
     socket.addEventListener('close', (event) => {
       if (wsAudioStateRef.current.id !== runId) return;
       const closeReason = event?.reason || 'socket_close';
+      console.log(`${logTag} closed`, {
+        turnId,
+        code: event?.code,
+        reason: closeReason,
+      });
       console.log('[ws-audio] ws_onclose', {
         turnId,
         code: event?.code,
@@ -2686,17 +2810,24 @@ const App: React.FC = () => {
         wsAudioStateRef.current.pcmContext = null;
       }
       if (wsAudioStateRef.current.audio) {
-        wsAudioStateRef.current.audio.pause();
-        wsAudioStateRef.current.audio.currentTime = 0;
-        wsAudioStateRef.current.audio.src = '';
-        wsAudioStateRef.current.audio.dataset.source = 'other';
-        wsAudioStateRef.current.audio.dataset.wsRunId = '';
+        const currentAudio = wsAudioStateRef.current.audio;
+        const isCurrentWsAudio =
+          currentAudio.dataset.source === 'ws_audio'
+          && currentAudio.dataset.wsRunId === String(runId);
+        if (isCurrentWsAudio) {
+          currentAudio.pause();
+          currentAudio.currentTime = 0;
+          currentAudio.src = '';
+          currentAudio.dataset.source = 'other';
+          currentAudio.dataset.wsRunId = '';
+        }
       }
       wsAudioStateRef.current.recorder = null;
       wsAudioStateRef.current.stream = null;
       wsAudioStateRef.current.pcmActive = false;
       wsAudioStateRef.current.socket = null;
       wsAudioStateRef.current.turnId = null;
+      wsAudioStateRef.current.page = null;
       wsAudioStateRef.current.audio = null;
       wsAudioStateRef.current.stopRequested = false;
       wsAudioStateRef.current.useUi = false;
@@ -2710,7 +2841,7 @@ const App: React.FC = () => {
       endThinkingOnce();
     });
 
-    socket.addEventListener('message', (event) => {
+    socket.addEventListener('message', async (event) => {
       if (wsAudioStateRef.current.id !== runId) return;
       let payload: any;
       try {
@@ -2720,88 +2851,102 @@ const App: React.FC = () => {
         return;
       }
       console.log('[ws-audio] message', payload);
-        if (payload?.type === 'partial_asr') {
-          if (!firstPartialLogged) {
-            firstPartialLogged = true;
-            console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
-          }
-          console.log('[ws-audio] partial_asr', payload.text);
-          const asrText = String(payload?.text ?? '').trim();
-          const isFinal = payload?.phase === 'final';
-          const noisyPartial = isNoisyPartial(asrText);
+      if (payload?.type === 'partial_asr') {
+        if (!firstPartialLogged) {
+          firstPartialLogged = true;
+          console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
+        }
+        console.log('[ws-audio] partial_asr', payload.text);
+        const asrText = String(payload?.text ?? '').trim();
+        const isFinal = payload?.phase === 'final';
+        const noisyPartial = isNoisyPartial(asrText);
+        if (isFinal) {
+          console.log('[ws-audio] final_asr_ms', Math.round(performance.now() - requestStart));
+        }
+        if (useUi) {
           if (isFinal) {
-            console.log('[ws-audio] final_asr_ms', Math.round(performance.now() - requestStart));
-          }
-          if (useUi) {
-            if (isFinal) {
-              const finalText = (!noisyPartial && asrText) ? asrText : lastStableAsrText;
-              if (finalText) {
-                setChatUserText(finalText);
-                lastStableAsrText = finalText;
-              }
-            } else if (asrText && !noisyPartial) {
-              setChatUserText(asrText);
-              lastStableAsrText = asrText;
-            } else if (asrText && noisyPartial) {
-              console.log('[ws-audio] partial_asr_suppressed', { text: asrText });
+            const nextFinalText = (!noisyPartial && asrText) ? asrText : lastStableAsrText;
+            if (nextFinalText) {
+              setChatUserText(nextFinalText);
+              lastStableAsrText = nextFinalText;
             }
-          }
-          const effectiveText = isFinal
-            ? ((asrText && !noisyPartial) ? asrText : lastStableAsrText)
-            : '';
-          if (
-            useUi &&
-            isHomeView &&
-            isFinal &&
-            effectiveText &&
-            !intentCheckInFlight &&
-            !skipWsChat
-          ) {
-            intentCheckInFlight = true;
-            const snippet = effectiveText.replace(/\s+/g, ' ').slice(0, 80);
-            console.log('[ws-audio] intent_request_start', { turnId, text: snippet });
-            console.log('[ws-audio] intent_check_start', { text: snippet });
-            void (async () => {
-              try {
-                const interaction = await requestIntent(effectiveText);
-                const intent = interaction?.type ?? 'unknown';
-                console.log('[ws-audio] intent_check_result', { intent });
-                if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
-                  console.log('[ws-audio] memo_saved');
-                  await applyInteraction(interaction, effectiveText);
-                }
-                if (interaction?.type === 'breakdown') {
-                  console.log('[ws-audio] breakdown_triggered');
-                  await applyInteraction(interaction, effectiveText);
-                  suppressWsChatForBreakdown('intent_breakdown');
-                }
-              } catch (error) {
-                console.warn('[ws-audio] intent_check_failed', error);
-              } finally {
-                intentCheckInFlight = false;
-                console.log('[ws-audio] intent_request_end', { turnId });
-              }
-            })();
+          } else if (asrText && !noisyPartial) {
+            setChatUserText(asrText);
+            lastStableAsrText = asrText;
+          } else if (asrText && noisyPartial) {
+            console.log('[ws-audio] partial_asr_suppressed', { text: asrText });
           }
         }
-        if (payload?.type === 'partial_text') {
-          if (skipWsChat) return;
-          if (!firstPartialTextLogged) {
-            firstPartialTextLogged = true;
-            console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
+        const effectiveText = isFinal
+          ? ((asrText && !noisyPartial) ? asrText : lastStableAsrText)
+          : '';
+        if (isFinal && effectiveText) {
+          finalTranscript = effectiveText;
+          console.log(`${logTag} final_asr`, {
+            turnId,
+            text: effectiveText.replace(/\s+/g, ' ').slice(0, 80),
+          });
+        }
+      }
+      if (payload?.type === 'focus_state') {
+        applyFocusStreamState(payload?.state);
+        return;
+      }
+      if (payload?.type === 'interaction') {
+        interactionHandled = true;
+        const interaction = payload?.interaction;
+        const userText = sanitizeText(String(payload?.user_text ?? finalTranscript ?? ''));
+        console.log(`${logTag} interaction_received`, {
+          turnId,
+          type: interaction?.type,
+          userText: userText.slice(0, 80),
+        });
+        if (page === 'task' && interaction?.type === 'breakdown') {
+          commitTaskUserMessage(userText);
+          const assistantText = sanitizeText(String(interaction?.audio_text ?? ''));
+          if (assistantText) {
+            appendTaskMessage('assistant', assistantText);
           }
-          const fragment = String(payload.text ?? '');
+        }
+        try {
+          await applyInteraction(interaction, userText);
+          queueInteractionSpeech(interaction);
+        } catch (error) {
+          console.warn(`${logTag} interaction_apply_failed`, error);
+        }
+        return;
+      }
+      if (payload?.type === 'partial_text') {
+        if (interactionHandled) return;
+        if (!firstPartialTextLogged) {
+          firstPartialTextLogged = true;
+          console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
+        }
+        const fragment = String(payload.text ?? '');
         assistantBuffer += fragment;
         console.log('[ws-audio] partial_text', fragment);
         if (useUi) {
           setChatAssistantText(assistantBuffer);
-          if (isHomeView) {
+          if (page === 'home') {
             setHomeChatBubble(wrapTextByWidth(assistantBuffer));
+          } else if (page === 'task') {
+            if (finalTranscript) {
+              commitTaskUserMessage(finalTranscript);
+            }
+            const assistantId = ensureTaskAssistantMessage();
+            if (assistantId) {
+              updateTaskMessage(assistantId, assistantBuffer);
+            }
+            if (!isInitialTaskLocked) {
+              setIsInitialTaskLocked(true);
+            }
+          } else if (page === 'focus') {
+            setSpeechBubble(assistantBuffer);
           }
         }
       }
-        if (payload?.type === 'audio_chunk') {
-          if (skipWsChat) return;
+      if (payload?.type === 'audio_chunk') {
+        if (interactionHandled) return;
           const seq = typeof payload.seq === 'number' ? payload.seq : null;
           if (seq === null) {
             console.warn('[ws-audio] audio_chunk missing seq');
@@ -2903,6 +3048,7 @@ const App: React.FC = () => {
               setAvatarSpeechState('idle');
               wsAudioStateRef.current.turnActive = false;
               wsAudioStateRef.current.pendingAudio = 0;
+              maybeFinishFocusAfterReply();
             }
             currentPlayingSeq = null;
             playNext();
@@ -2916,8 +3062,30 @@ const App: React.FC = () => {
           doneLogged = true;
           console.log('[ws-audio] ws_done_ms', Math.round(performance.now() - requestStart));
         }
+        console.log(`${logTag} done`, {
+          turnId,
+          reason: payload?.reason,
+          pendingAudio: audioQueue.size,
+        });
         wsAudioStateRef.current.ttsDone = true;
         clearWatchdog();
+        if (
+          page === 'focus'
+          && payload?.reason === 'transcript_ready'
+          && finalTranscript
+          && !focusTranscriptHandled
+        ) {
+          focusTranscriptHandled = true;
+          console.log(`${logTag} transcript_ready`, {
+            turnId,
+            text: finalTranscript.replace(/\s+/g, ' ').slice(0, 80),
+          });
+          try {
+            await handleFocusUserText(finalTranscript);
+          } catch (error) {
+            console.warn(`${logTag} focus_transcript_apply_failed`, error);
+          }
+        }
         if (audioQueue.size > 0) {
           const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
           console.warn('[ws-audio] audio_chunks_pending', { expectedSeq, pendingSeqs });
@@ -2928,6 +3096,22 @@ const App: React.FC = () => {
           setAvatarSpeechState('idle');
           wsAudioStateRef.current.turnActive = false;
           wsAudioStateRef.current.pendingAudio = 0;
+          if (page === 'focus' && assistantBuffer) {
+            setFocusPrompt(assistantBuffer);
+          }
+          maybeFinishFocusAfterReply();
+        }
+        if (payload?.reason === 'interaction') {
+          flushQueuedInteractionSpeech();
+          if (socket.readyState === WebSocket.OPEN) {
+            closeWsAudio('interaction_done');
+          }
+        }
+        if (page === 'focus' && assistantBuffer) {
+          setFocusPrompt(assistantBuffer);
+        }
+        if (payload?.reason === 'transcript_ready' && socket.readyState === WebSocket.OPEN) {
+          closeWsAudio('transcript_ready');
         }
         endThinkingOnce();
       }
@@ -2950,8 +3134,10 @@ const App: React.FC = () => {
         if (useUi && payload?.message === 'empty_asr_text') {
           const hint = '刚才没听清楚，请再试一次。';
           setChatAssistantText(hint);
-          if (isHomeView) {
+          if (page === 'home') {
             setHomeChatBubble(wrapTextByWidth(hint));
+          } else if (page === 'focus') {
+            setSpeechBubble(hint);
           }
         }
         allowEnd = false;
@@ -2977,14 +3163,27 @@ const App: React.FC = () => {
       wsAudioStateRef.current.ttsDone = false;
       console.warn('[ws-audio] socket_error', event);
       if (useUi && !recorderStarted) {
-        console.warn('[ws-audio] fallback_triggered');
-        startRecording(sendVoiceIntent);
+        fallbackToUploadVoice('socket_error');
       }
       if (socket.readyState === WebSocket.OPEN) {
         closeWsAudio('error');
       }
     });
   };
+
+  const runWsAudioTest = async (
+    durationMs = 3000,
+    chunkMs = 300,
+    message = 'ws audio test',
+    useUi = false,
+  ) => startStreamingVoiceInteraction({
+    page: 'home',
+    durationMs,
+    chunkMs,
+    message,
+    useUi,
+    fallbackHandler: sendVoiceIntent,
+  });
 
   const stopWsAudioRecording = () => {
     const sendEndAudioOnce = (reason: string) => {
@@ -3062,9 +3261,16 @@ const App: React.FC = () => {
 
   const handleFocusAudioClick = () => {
     if (isRecording) {
-      stopRecording();
+      stopActiveVoiceCapture();
     } else {
-      startRecording(sendFocusVoice);
+      void startStreamingVoiceInteraction({
+        page: 'focus',
+        durationMs: 0,
+        chunkMs: 300,
+        message: 'focus_voice',
+        useUi: true,
+        fallbackHandler: sendFocusVoice,
+      });
     }
   };
 
@@ -3088,12 +3294,19 @@ const App: React.FC = () => {
       if (!event.ctrlKey) return;
       const key = event.key.toLowerCase();
       const code = event.code;
-      const isCtrlQ = key === 'q' || code === 'KeyQ';
+      const isCtrlQ = !event.shiftKey && (key === 'q' || code === 'KeyQ');
+      const isCtrlShiftQ = event.shiftKey && (key === 'q' || code === 'KeyQ');
       const isCtrlE = key === 'e' || code === 'KeyE';
-      if (DEMO_SCREEN_CHECK_SHORTCUTS && (isCtrlQ || isCtrlE)) {
+      if (isCtrlQ) {
         event.preventDefault();
         event.stopPropagation();
-        triggerDemoScreenCheck(isCtrlQ ? 'related' : 'unrelated');
+        triggerDemoFatigueCheck();
+        return;
+      }
+      if (DEMO_SCREEN_CHECK_SHORTCUTS && (isCtrlShiftQ || isCtrlE)) {
+        event.preventDefault();
+        event.stopPropagation();
+        triggerDemoScreenCheck(isCtrlShiftQ ? 'related' : 'unrelated');
         return;
       }
       const isDigit1 = key === '1' || code === 'Digit1' || code === 'Numpad1';
@@ -3305,6 +3518,22 @@ const App: React.FC = () => {
 
   useEffect(() => {
     currentViewRef.current = currentView;
+    const activeVoicePage = wsAudioStateRef.current.page;
+    const hasActiveVoiceWs = Boolean(
+      activeVoicePage
+      && (
+        wsAudioStateRef.current.socket
+        || wsAudioStateRef.current.recorder
+        || wsAudioStateRef.current.pcmActive
+        || wsAudioStateRef.current.stopRequested
+      ),
+    );
+    if (hasActiveVoiceWs && activeVoicePage !== currentView) {
+      console.log(`[VoiceWS][${activeVoicePage}] stop_on_view_change`, {
+        nextView: currentView,
+      });
+      stopWsAudioRecording();
+    }
     if (currentView !== 'break') {
       setBreakStretchQueued(false);
       setBreakStretchPlayed(false);
