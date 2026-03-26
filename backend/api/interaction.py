@@ -29,6 +29,8 @@ from demo_task_breakdown import (
 from services import audio_service, voice_pipeline_service
 from services.interaction_service import (
     process_user_intent,
+    resolve_focus_route,
+    should_use_llm_for_focus,
     stream_breakdown_reply,
     stream_chat_reply,
     stream_focus_reply,
@@ -42,6 +44,10 @@ VOICE_TRANSCRIPT_FILLER_RE = re.compile(
 )
 VOICE_TRANSCRIPT_PUNCTUATION_RE = re.compile(r"[\s，。！？、,.!?;；:：'\"“”‘’（）()【】\[\]<>《》]+")
 VOICE_STREAM_SPLIT_PUNCTUATION = set("。！？!?")
+VOICE_STREAM_FAST_SPLIT_PUNCTUATION = set("。！？!?；;：:")
+VOICE_STREAM_FIRST_SENTENCE_MIN_CHARS = 8
+VOICE_STREAM_FAST_SENTENCE_MIN_CHARS = 12
+VOICE_STREAM_FIRST_SENTENCE_COMPLETE_SUFFIXES = set("了吗呢吧呀啊哦喔哈")
 
 
 def _normalize_guard_text(text: Optional[str]) -> str:
@@ -51,6 +57,27 @@ def _normalize_guard_text(text: Optional[str]) -> str:
 def _compact_guard_text(text: Optional[str]) -> str:
     cleaned = _normalize_guard_text(text)
     return VOICE_TRANSCRIPT_PUNCTUATION_RE.sub("", cleaned)
+
+
+def _sanitize_focus_context_text(text: Optional[str], max_len: int = 120) -> str:
+    cleaned = _normalize_guard_text(text)
+    if not cleaned:
+        return ""
+    return cleaned[:max_len]
+
+
+def _sanitize_focus_todo_snapshot(value: Any, limit: int = 3) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    items: List[str] = []
+    for raw in value:
+        cleaned = _sanitize_focus_context_text(str(raw or ""), max_len=60)
+        if not cleaned:
+            continue
+        items.append(cleaned)
+        if len(items) >= limit:
+            break
+    return items
 
 
 def _assess_voice_transcript(text: Optional[str]) -> Dict[str, Any]:
@@ -147,6 +174,187 @@ class IntentRequest(BaseModel):
     """Text intent routing request."""
     text: str
     emotion: Optional[str] = None
+    page: Optional[str] = None
+
+
+class FocusTextRequest(BaseModel):
+    """Focus text routing request."""
+    text: str
+    emotion: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+
+
+def parse_focus_rest_decision(text: str) -> Optional[bool]:
+    normalized = "".join(str(text or "").split())
+    if not normalized:
+        return None
+    if any(token in normalized for token in ("不用", "不想", "继续", "不休息", "先不")):
+        return False
+    if any(token in normalized for token in ("好", "休息", "可以", "行", "嗯", "要", "好的")):
+        return True
+    return None
+
+
+async def build_focus_turn(
+    transcript: str,
+    emotion: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized_text = (transcript or "").strip()
+    compact_transcript = _normalize_guard_text(normalized_text)
+    if len(compact_transcript) > 120:
+        compact_transcript = f"{compact_transcript[:120]}..."
+    print(f"[FocusRoute] page=focus transcript={compact_transcript}")
+    if any(keyword in normalized_text for keyword in ("闪念", "闪电", "提醒")):
+        interaction = await process_user_intent(normalized_text, emotion, page="focus")
+        if (
+            interaction
+            and interaction.get("type") == "command"
+            and (interaction.get("ui_payload") or {}).get("command") == "save_memo"
+        ):
+            return {
+                "mode": "interaction",
+                "interaction": interaction,
+                "user_text": normalized_text,
+            }
+
+    focus_context = context or {}
+    session_id = str(focus_context.get("focus_session_id") or "").strip()
+    remaining_seconds = int(focus_context.get("remaining_seconds") or 0)
+    session = focus_session_manager.get(session_id) if session_id else None
+    context_focus_goal = _sanitize_focus_context_text(
+        focus_context.get("focus_goal") or focus_context.get("task_title")
+    )
+    context_todo_snapshot = _sanitize_focus_todo_snapshot(focus_context.get("todo_snapshot"))
+    focus_route = resolve_focus_route(normalized_text)
+    print(f"[FocusRoute] page=focus category={focus_route.get('category')}")
+    llm_decision = should_use_llm_for_focus(normalized_text, focus_route)
+    print(
+        f"[FocusRoute] should_use_llm={llm_decision.get('use_llm')} "
+        f"reason={llm_decision.get('reason')}"
+    )
+    log_focus_goal = context_focus_goal or (session.task_text if session else normalized_text)
+    log_todo_snapshot = " | ".join(context_todo_snapshot) if context_todo_snapshot else "-"
+    print(f"[FocusRoute] focus_goal={(log_focus_goal or '-')[:120]}")
+    print(f"[FocusRoute] todo_snapshot={log_todo_snapshot[:160]}")
+
+    purpose = "continue"
+    tts_emotion = "neutral"
+    start_focus_monitors = False
+    end_focus_after_reply = False
+    reply_text = ""
+    route_task_text = (session.task_text if session else "") or context_focus_goal
+    route_focus_goal = context_focus_goal or route_task_text
+    route_todo_snapshot = context_todo_snapshot
+    reply_task_type = "stream_focus_voice"
+    llm_path = "fast_template"
+
+    if not session:
+        if focus_route.get("category") in ("filler_confirm", "greeting", "simple_focus_support"):
+            purpose = focus_route.get("purpose") or "continue"
+            reply_text = focus_route.get("template") or "我们继续吧。"
+            print(f"[FocusRoute] using_fast_template={focus_route.get('template_key')}")
+        elif llm_decision.get("use_llm") == "true":
+            purpose = "focus_question"
+            reply_task_type = "stream_focus_llm_answer"
+            llm_path = "focus_llm"
+            print("[FocusRoute] using_focus_llm_answer")
+        else:
+            session = focus_session_manager.create_session(normalized_text, remaining_seconds)
+            focus_session_manager.record_message(session.id, "user", normalized_text)
+            purpose = "encourage"
+            tts_emotion = "encouraging"
+            start_focus_monitors = True
+            route_task_text = session.task_text if session else normalized_text
+            route_focus_goal = session.task_text if session else (context_focus_goal or normalized_text)
+            print("[FocusRoute] using_fast_template=encourage_start")
+    elif session.awaiting_rest_response:
+        if session.demo_force_rest_flow:
+            accept_rest = True
+        else:
+            decision = parse_focus_rest_decision(normalized_text)
+            accept_rest = False if decision is None else decision
+        user_text = normalized_text or ("休息" if accept_rest else "继续")
+        focus_session_manager.record_message(session.id, "user", user_text)
+        session.awaiting_rest_response = False
+        if accept_rest:
+            purpose = "end_focus"
+            end_focus_after_reply = True
+        else:
+            purpose = "continue"
+            reply_text = "我们继续吧。"
+            print("[FocusRoute] using_fast_template=continue_default")
+    else:
+        focus_session_manager.record_message(session.id, "user", normalized_text)
+        route_task_text = session.task_text
+        route_focus_goal = context_focus_goal or session.task_text
+        if llm_decision.get("use_llm") == "true":
+            purpose = "focus_question"
+            reply_task_type = "stream_focus_llm_answer"
+            llm_path = "focus_llm"
+            print("[FocusRoute] using_focus_llm_answer")
+        else:
+            purpose = focus_route.get("purpose") or "continue"
+            reply_text = focus_route.get("template") or "我们继续吧。"
+        if focus_route.get("purpose") == "focus_meaningful" and llm_path != "focus_llm":
+            print("[FocusRoute] using_meaningful_focus_reply")
+        elif llm_path != "focus_llm":
+            print(f"[FocusRoute] using_fast_template={focus_route.get('template_key')}")
+
+    async def on_complete_text(reply_text_value: str) -> None:
+        cleaned = (reply_text_value or "").strip()
+        if cleaned and session:
+            focus_session_manager.record_message(session.id, "assistant", cleaned)
+
+    if session and purpose == "end_focus" and session.demo_force_rest_flow:
+        async def on_complete_demo_text(reply_text_value: str) -> None:
+            cleaned = (reply_text_value or "").strip()
+            if cleaned and session:
+                focus_session_manager.record_message(session.id, "assistant", cleaned)
+                session.demo_force_rest_flow = False
+
+        return {
+            "mode": "focus_stream",
+            "purpose": purpose,
+            "task_text": route_task_text,
+            "user_text": normalized_text,
+            "history": list(session.memory[-6:]) if session else [],
+            "tts_emotion": "neutral",
+            "chunk_stream": iter(["休息是为了接下来更好的继续哦。"]),
+            "focus_state": {
+                "action": "end_focus",
+                "session_id": session.id if session else None,
+                "task_text": session.task_text if session else normalized_text,
+                "awaiting_rest_response": False,
+                "start_focus_monitors": False,
+                "end_focus_after_reply": True,
+            },
+            "on_complete_text": on_complete_demo_text,
+        }
+
+    return {
+        "mode": "focus_stream",
+        "purpose": purpose,
+        "task_text": route_task_text,
+        "user_text": normalized_text,
+        "reply_text": reply_text,
+        "focus_route_category": focus_route.get("category"),
+        "reply_task_type": reply_task_type,
+        "llm_path": llm_path,
+        "focus_goal": route_focus_goal,
+        "todo_snapshot": route_todo_snapshot,
+        "history": list(session.memory[-6:]) if session else [],
+        "tts_emotion": tts_emotion,
+        "focus_state": {
+            "action": "end_focus" if end_focus_after_reply else ("start_session" if start_focus_monitors else purpose),
+            "session_id": session.id if session else None,
+            "task_text": route_task_text,
+            "awaiting_rest_response": bool(session.awaiting_rest_response) if session else False,
+            "start_focus_monitors": start_focus_monitors,
+            "end_focus_after_reply": end_focus_after_reply,
+        },
+        "on_complete_text": on_complete_text,
+    }
 
 
 @router.post("/generate-tasks", response_model=TaskGenerationResponse)
@@ -307,6 +515,86 @@ def _split_text_into_sentences(text: str, max_len: int = 80) -> List[str]:
     return chunks
 
 
+def _should_flush_fast_sentence(
+    page: str,
+    task_type: str,
+    text: str,
+    first_sentence_pending: bool = False,
+) -> bool:
+    if page not in ("task", "focus") and task_type not in (
+        "stream_breakdown_voice",
+        "stream_focus_voice",
+        "stream_chat_voice_task",
+        "stream_chat_voice_fast",
+    ):
+        return False
+    trimmed = (text or "").rstrip()
+    if not trimmed:
+        return False
+    if trimmed[-1] in VOICE_STREAM_FAST_SPLIT_PUNCTUATION:
+        return True
+    compact = _compact_guard_text(trimmed)
+    if first_sentence_pending:
+        if len(compact) >= VOICE_STREAM_FIRST_SENTENCE_MIN_CHARS and compact[-1] in VOICE_STREAM_FIRST_SENTENCE_COMPLETE_SUFFIXES:
+            return True
+        return len(compact) >= 10
+    return len(compact) >= VOICE_STREAM_FAST_SENTENCE_MIN_CHARS
+
+
+async def _iter_text_chunks(text: str, chunk_size: int = 5) -> AsyncIterator[str]:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return
+    for index in range(0, len(cleaned), chunk_size):
+        yield cleaned[index:index + chunk_size]
+
+
+def _compact_tts_log_text(text: Optional[str], limit: int = 160) -> str:
+    cleaned = " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
+    if len(cleaned) > limit:
+        return f"{cleaned[:limit]}..."
+    return cleaned
+
+
+def _log_ws_tts_chunk_error(
+    turn_id: str,
+    seq: int,
+    sentence: str,
+    error_payload: Optional[Dict[str, Any]] = None,
+    *,
+    result: Optional[Dict[str, Any]] = None,
+    exc: Optional[Exception] = None,
+) -> None:
+    payload = dict(error_payload or {})
+    result = result or {}
+    if exc is not None:
+        payload.setdefault("type", exc.__class__.__name__)
+        payload.setdefault("code", "tts_worker_exception")
+        payload.setdefault("message", str(exc) or "TTS worker exception")
+        payload.setdefault("sdk_error", repr(exc))
+    model = payload.get("model") or result.get("model") or getattr(audio_service, "model", None) or "-"
+    voice = payload.get("voice") or result.get("voice") or getattr(audio_service, "DEFAULT_VOICE", None) or "-"
+    rate = payload.get("rate") if payload.get("rate") is not None else result.get("rate")
+    text = payload.get("text") or _compact_tts_log_text(sentence)
+    text_length = payload.get("text_length") or len((sentence or "").strip())
+    print(
+        "[TTS] error "
+        f"turn_id={turn_id} seq={seq} "
+        f"type={payload.get('type') or '-'} "
+        f"message={payload.get('message') or '-'} "
+        f"http_status={payload.get('http_status')} "
+        f"code={payload.get('code') or '-'} "
+        f"model={model} "
+        f"voice={voice} "
+        f"rate={rate} "
+        f"text={text or '-'} "
+        f"len={text_length} "
+        f"realtime_after_cache_miss={payload.get('realtime_after_cache_miss')} "
+        f"response_body={payload.get('response_body') or '-'} "
+        f"sdk_error={payload.get('sdk_error') or '-'}"
+    )
+
+
 @router.post("/speak-chunks")
 async def speak_chunks(request: SpeakChunksRequest):
     """Chunked TTS test endpoint (text only)."""
@@ -334,6 +622,7 @@ async def speak_chunks(request: SpeakChunksRequest):
                     "error_stage": "tts",
                     "index": index,
                     "text": sentence,
+                    "tts_error": error_payload,
                 },
             )
         chunks.append({
@@ -388,8 +677,12 @@ async def interaction_ws(websocket: WebSocket):
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized_text = (transcript or "").strip()
+        compact_transcript = _normalize_guard_text(normalized_text)
+        if len(compact_transcript) > 120:
+            compact_transcript = f"{compact_transcript[:120]}..."
+        print(f"[FocusRoute] page=focus transcript={compact_transcript}")
         if any(keyword in normalized_text for keyword in ("闪念", "闪电", "提醒")):
-            interaction = await process_user_intent(normalized_text, emotion)
+            interaction = await process_user_intent(normalized_text, emotion, page="focus")
             if (
                 interaction
                 and interaction.get("type") == "command"
@@ -405,21 +698,62 @@ async def interaction_ws(websocket: WebSocket):
         session_id = str(focus_context.get("focus_session_id") or "").strip()
         remaining_seconds = int(focus_context.get("remaining_seconds") or 0)
         session = focus_session_manager.get(session_id) if session_id else None
+        context_focus_goal = _sanitize_focus_context_text(
+            focus_context.get("focus_goal") or focus_context.get("task_title")
+        )
+        context_todo_snapshot = _sanitize_focus_todo_snapshot(focus_context.get("todo_snapshot"))
+        focus_route = resolve_focus_route(normalized_text)
+        print(f"[FocusRoute] page=focus category={focus_route.get('category')}")
+        llm_decision = should_use_llm_for_focus(normalized_text, focus_route)
+        print(
+            f"[FocusRoute] should_use_llm={llm_decision.get('use_llm')} "
+            f"reason={llm_decision.get('reason')}"
+        )
+        log_focus_goal = context_focus_goal or (session.task_text if session else normalized_text)
+        log_todo_snapshot = " | ".join(context_todo_snapshot) if context_todo_snapshot else "-"
+        print(f"[FocusRoute] focus_goal={(log_focus_goal or '-')[:120]}")
+        print(f"[FocusRoute] todo_snapshot={log_todo_snapshot[:160]}")
 
         purpose = "continue"
         tts_emotion = "neutral"
         start_focus_monitors = False
         end_focus_after_reply = False
+        reply_text = ""
+        route_task_text = (session.task_text if session else "") or context_focus_goal
+        route_focus_goal = context_focus_goal or route_task_text
+        route_todo_snapshot = context_todo_snapshot
+        reply_task_type = "stream_focus_voice"
+        llm_path = "fast_template"
 
         if not session:
-            session = focus_session_manager.create_session(normalized_text, remaining_seconds)
-            focus_session_manager.record_message(session.id, "user", normalized_text)
-            purpose = "encourage"
-            tts_emotion = "encouraging"
-            start_focus_monitors = True
+            if focus_route.get("category") in ("filler_confirm", "greeting"):
+                purpose = focus_route.get("purpose") or "continue"
+                reply_text = focus_route.get("template") or "我们继续吧。"
+                print(f"[FocusRoute] using_fast_template={focus_route.get('template_key')}")
+            elif focus_route.get("purpose") in ("focus_distracted", "focus_next_step", "focus_too_hard", "focus_memo"):
+                purpose = focus_route.get("purpose") or "continue"
+                reply_text = focus_route.get("template") or "先抓住眼前这一步，我们慢慢来。"
+                print(f"[FocusRoute] using_fast_template={focus_route.get('template_key')}")
+            elif llm_decision.get("use_llm") == "true":
+                purpose = "focus_question"
+                reply_task_type = "stream_focus_llm_answer"
+                llm_path = "focus_llm"
+                print("[FocusRoute] using_focus_llm_answer")
+            else:
+                session = focus_session_manager.create_session(normalized_text, remaining_seconds)
+                focus_session_manager.record_message(session.id, "user", normalized_text)
+                purpose = "encourage"
+                tts_emotion = "encouraging"
+                start_focus_monitors = True
+                route_task_text = session.task_text if session else normalized_text
+                route_focus_goal = session.task_text if session else (context_focus_goal or normalized_text)
+                print("[FocusRoute] using_fast_template=encourage_start")
         elif session.awaiting_rest_response:
-            decision = parse_focus_rest_decision(normalized_text)
-            accept_rest = False if decision is None else decision
+            if session.demo_force_rest_flow:
+                accept_rest = True
+            else:
+                decision = parse_focus_rest_decision(normalized_text)
+                accept_rest = False if decision is None else decision
             user_text = normalized_text or ("休息" if accept_rest else "继续")
             focus_session_manager.record_message(session.id, "user", user_text)
             session.awaiting_rest_response = False
@@ -428,26 +762,73 @@ async def interaction_ws(websocket: WebSocket):
                 end_focus_after_reply = True
             else:
                 purpose = "continue"
+                reply_text = "我们继续吧。"
+                print("[FocusRoute] using_fast_template=continue_default")
         else:
             focus_session_manager.record_message(session.id, "user", normalized_text)
-            purpose = "continue"
+            route_task_text = session.task_text
+            route_focus_goal = context_focus_goal or session.task_text
+            if llm_decision.get("use_llm") == "true":
+                purpose = "focus_question"
+                reply_task_type = "stream_focus_llm_answer"
+                llm_path = "focus_llm"
+                print("[FocusRoute] using_focus_llm_answer")
+            else:
+                purpose = focus_route.get("purpose") or "continue"
+                reply_text = focus_route.get("template") or "我们继续吧。"
+            if focus_route.get("purpose") == "focus_meaningful" and llm_path != "focus_llm":
+                print("[FocusRoute] using_meaningful_focus_reply")
+            elif llm_path != "focus_llm":
+                print(f"[FocusRoute] using_fast_template={focus_route.get('template_key')}")
 
         async def on_complete_text(reply_text: str) -> None:
             cleaned = (reply_text or "").strip()
             if cleaned and session:
                 focus_session_manager.record_message(session.id, "assistant", cleaned)
 
+        if session and purpose == "end_focus" and session.demo_force_rest_flow:
+            async def on_complete_demo_text(reply_text: str) -> None:
+                cleaned = (reply_text or "").strip()
+                if cleaned and session:
+                    focus_session_manager.record_message(session.id, "assistant", cleaned)
+                    session.demo_force_rest_flow = False
+
+            return {
+                "mode": "focus_stream",
+                "purpose": purpose,
+                "task_text": route_task_text,
+                "user_text": normalized_text,
+                "history": list(session.memory[-6:]) if session else [],
+                "tts_emotion": "neutral",
+                "chunk_stream": iter(["休息是为了接下来更好的继续哦。"]),
+                "focus_state": {
+                    "action": "end_focus",
+                    "session_id": session.id if session else None,
+                    "task_text": session.task_text if session else normalized_text,
+                    "awaiting_rest_response": False,
+                    "start_focus_monitors": False,
+                    "end_focus_after_reply": True,
+                },
+                "on_complete_text": on_complete_demo_text,
+            }
+
         return {
             "mode": "focus_stream",
             "purpose": purpose,
-            "task_text": session.task_text if session else normalized_text,
+            "task_text": route_task_text,
             "user_text": normalized_text,
+            "reply_text": reply_text,
+            "focus_route_category": focus_route.get("category"),
+            "reply_task_type": reply_task_type,
+            "llm_path": llm_path,
+            "focus_goal": route_focus_goal,
+            "todo_snapshot": route_todo_snapshot,
             "history": list(session.memory[-6:]) if session else [],
             "tts_emotion": tts_emotion,
             "focus_state": {
                 "action": "end_focus" if end_focus_after_reply else ("start_session" if start_focus_monitors else purpose),
                 "session_id": session.id if session else None,
-                "task_text": session.task_text if session else normalized_text,
+                "task_text": route_task_text,
                 "awaiting_rest_response": bool(session.awaiting_rest_response) if session else False,
                 "start_focus_monitors": start_focus_monitors,
                 "end_focus_after_reply": end_focus_after_reply,
@@ -481,12 +862,16 @@ async def interaction_ws(websocket: WebSocket):
         tts_seq = 0
         first_tts_logged = False
         first_tts_sentence_logged = False
+        first_complete_sentence_logged = False
         first_audio_sent_logged = False
         full_text = ""
+        page = (turn_pages.get(turn_id) or "home").strip().lower()
+        turn_start = (audio_buffers.get(turn_id) or {}).get("start", connection_start)
         print(
             "[ws] llm_stream_start_ms="
             f"{int((start - connection_start) * 1000)} turn_id={turn_id} source={source_label}"
         )
+        print(f"[VoicePerf] page={page} turn_id={turn_id} llm_stream_start_ms={int((start - turn_start) * 1000)} source={source_label} task_type={task_type}")
         try:
             if turn_token != current_turn_token:
                 return
@@ -508,6 +893,7 @@ async def interaction_ws(websocket: WebSocket):
                                 "[ws] first_tts_chunk_start_ms="
                                 f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
                             )
+                            print(f"[VoicePerf] page={page} turn_id={turn_id} first_tts_worker_ms={int((time.perf_counter() - turn_start) * 1000)}")
                         snippet = (sentence or "").replace("\n", " ").strip()
                         if len(snippet) > 80:
                             snippet = f"{snippet[:80]}..."
@@ -520,18 +906,19 @@ async def interaction_ws(websocket: WebSocket):
                             results = await audio_service.speak_chunks([sentence], tts_emotion)
                         except Exception as exc:
                             tts_failed = True
-                            await send({
-                                "type": "error",
-                                "turn_id": turn_id,
-                                "message": str(exc),
-                                "error_stage": "tts",
-                            })
-                            await send({
-                                "type": "done",
-                                "turn_id": turn_id,
-                                "reason": "tts_error",
-                            })
-                            return
+                            _log_ws_tts_chunk_error(turn_id, tts_seq, sentence, exc=exc)
+                            print(
+                                "[ws] tts_chunk_result "
+                                f"turn_id={turn_id} seq={tts_seq} status=error audio_len=0"
+                            )
+                            print(
+                                f"[TTSFallback] text_only turn_id={turn_id} reason=worker_exception"
+                            )
+                            print(
+                                "[ws] tts_chunk_skip "
+                                f"turn_id={turn_id} seq={tts_seq} reason=worker_exception text_only=true"
+                            )
+                            continue
                         result = results[0] if results else {}
                         audio_b64 = result.get("audio_data") or ""
                         print(
@@ -542,18 +929,22 @@ async def interaction_ws(websocket: WebSocket):
                         if result.get("status") == "error" or not audio_b64:
                             error_payload = result.get("error") or {}
                             tts_failed = True
-                            await send({
-                                "type": "error",
-                                "turn_id": turn_id,
-                                "message": error_payload.get("message") or "TTS failed",
-                                "error_stage": "tts",
-                            })
-                            await send({
-                                "type": "done",
-                                "turn_id": turn_id,
-                                "reason": "tts_error",
-                            })
-                            return
+                            _log_ws_tts_chunk_error(
+                                turn_id,
+                                tts_seq,
+                                sentence,
+                                error_payload,
+                                result=result,
+                            )
+                            print(
+                                f"[TTSFallback] text_only turn_id={turn_id} reason={error_payload.get('code') or 'tts_error'}"
+                            )
+                            print(
+                                "[ws] tts_chunk_skip "
+                                f"turn_id={turn_id} seq={tts_seq} "
+                                f"reason={error_payload.get('code') or 'tts_error'} text_only=true"
+                            )
+                            continue
                         await send({
                             "type": "audio_chunk",
                             "turn_id": turn_id,
@@ -561,8 +952,8 @@ async def interaction_ws(websocket: WebSocket):
                             "audio": audio_b64,
                             "format": result.get("format", "mp3"),
                             "text": sentence,
-                            "mock": False,
-                            "source": "tts_chunked",
+                            "mock": result.get("status") == "mock",
+                            "source": result.get("tts_source") or "tts_chunked",
                         })
                         print(
                             "[ws] audio_chunk_sent "
@@ -574,6 +965,7 @@ async def interaction_ws(websocket: WebSocket):
                                 "[ws] first_audio_chunk_sent_ms="
                                 f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
                             )
+                            print(f"[VoicePerf] page={page} turn_id={turn_id} first_audio_chunk_sent_ms={int((time.perf_counter() - turn_start) * 1000)}")
                         tts_seq += 1
 
                 tts_task = asyncio.create_task(tts_worker())
@@ -599,11 +991,9 @@ async def interaction_ws(websocket: WebSocket):
                     if enable_tts and tts_queue is not None:
                         sentence_buffer += chunk
                         trimmed = sentence_buffer.rstrip()
-                        if trimmed:
-                            ends_with_punct = trimmed[-1] in punctuation
-                        else:
-                            ends_with_punct = False
-                        pieces = _split_text_into_sentences(sentence_buffer)
+                        ends_with_punct = bool(trimmed) and trimmed[-1] in punctuation
+                        pieces = _split_text_into_sentences(sentence_buffer, max_len=24 if page in ("task", "focus") else 80)
+                        complete = []
                         if pieces:
                             if ends_with_punct:
                                 complete = pieces
@@ -611,17 +1001,31 @@ async def interaction_ws(websocket: WebSocket):
                             else:
                                 complete = pieces[:-1]
                                 sentence_buffer = pieces[-1] if pieces else ""
-                            for sentence in complete:
-                                if sentence:
-                                    if not first_tts_sentence_logged:
-                                        first_tts_sentence_logged = True
-                                        print(
-                                            "[ws] first_tts_sentence_queued_ms="
-                                            f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
-                                        )
-                                    await tts_queue.put(sentence)
+                        elif _should_flush_fast_sentence(
+                            page,
+                            task_type,
+                            sentence_buffer,
+                            first_sentence_pending=not first_tts_sentence_logged,
+                        ):
+                            complete = [sentence_buffer.strip()]
+                            sentence_buffer = ""
+                        for sentence in complete:
+                            if sentence:
+                                if not first_complete_sentence_logged:
+                                    first_complete_sentence_logged = True
+                                    print(f"[TTSQueue] first_sentence_detected text={sentence[:80]}")
+                                    print(f"[VoicePerf] page={page} turn_id={turn_id} first_complete_sentence_ms={int((time.perf_counter() - turn_start) * 1000)}")
+                                if not first_tts_sentence_logged:
+                                    first_tts_sentence_logged = True
+                                    print(
+                                        "[ws] first_tts_sentence_queued_ms="
+                                        f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+                                    )
+                                    print(f"[TTSQueue] first_sentence_queued len={len(sentence)}")
+                                    print(f"[VoicePerf] page={page} turn_id={turn_id} first_tts_sentence_queued_ms={int((time.perf_counter() - turn_start) * 1000)}")
+                                await tts_queue.put(sentence)
                     if tts_failed:
-                        return
+                        print(f"[ws] tts_partial_failure turn_id={turn_id} stage=streaming text_only_continues=true")
 
             if turn_token != current_turn_token:
                 return
@@ -642,6 +1046,18 @@ async def interaction_ws(websocket: WebSocket):
                         tts_task.cancel()
                     return
                 if sentence_buffer.strip() and tts_queue is not None:
+                    if not first_complete_sentence_logged:
+                        first_complete_sentence_logged = True
+                        print(f"[TTSQueue] first_sentence_detected text={sentence_buffer.strip()[:80]}")
+                        print(f"[VoicePerf] page={page} turn_id={turn_id} first_complete_sentence_ms={int((time.perf_counter() - turn_start) * 1000)}")
+                    if not first_tts_sentence_logged:
+                        first_tts_sentence_logged = True
+                        print(
+                            "[ws] first_tts_sentence_queued_ms="
+                            f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
+                        )
+                        print(f"[TTSQueue] first_sentence_queued len={len(sentence_buffer.strip())}")
+                        print(f"[VoicePerf] page={page} turn_id={turn_id} first_tts_sentence_queued_ms={int((time.perf_counter() - turn_start) * 1000)}")
                     await tts_queue.put(sentence_buffer.strip())
                     sentence_buffer = ""
                 if tts_queue is not None:
@@ -649,7 +1065,7 @@ async def interaction_ws(websocket: WebSocket):
                 if tts_task is not None:
                     await tts_task
                 if tts_failed:
-                    return
+                    print(f"[ws] tts_partial_failure turn_id={turn_id} stage=done text_only_continues=true")
 
             completed_text = full_text.strip()
             if completed_text and on_complete_text is not None:
@@ -672,6 +1088,7 @@ async def interaction_ws(websocket: WebSocket):
                 "[ws] ws_turn_done_ms="
                 f"{int((time.perf_counter() - connection_start) * 1000)} turn_id={turn_id}"
             )
+            print(f"[VoicePerf] page={page} turn_id={turn_id} total_turn_ms={int((time.perf_counter() - turn_start) * 1000)}")
             print(f"[ws] ws_turn_cleanup turn_id={turn_id} reason=done")
             audio_buffers.pop(turn_id, None)
             turn_modes.pop(turn_id, None)
@@ -999,6 +1416,7 @@ async def interaction_ws(websocket: WebSocket):
                             f"[VoiceTranscript] final_from_complete={transcript[:120]} "
                             f"turn_id={turn_id} source={transcript_source}"
                         )
+                    print(f"[VoicePerf] page={page} turn_id={turn_id} asr_final_ms={int((time.perf_counter() - buffer['start']) * 1000)} transcript_source={transcript_source}")
                     transcript_check = _assess_voice_transcript(transcript)
                     if page in ("home", "task") and not transcript_check["usable"]:
                         print(
@@ -1029,10 +1447,14 @@ async def interaction_ws(websocket: WebSocket):
                         asr_adapter.close_session(turn_id, reason="invalid_voice_transcript")
                         continue
                     if page in ("home", "task"):
+                        intent_start = time.perf_counter()
                         interaction = await process_user_intent(
                             transcript,
                             asr_result.get("emotion", "neutral"),
+                            page=page,
+                            fast_breakdown=(page == "home"),
                         )
+                        print(f"[VoicePerf] page={page} turn_id={turn_id} intent_done_ms={int((time.perf_counter() - intent_start) * 1000)} intent={(interaction or {}).get('type', 'none')}")
                         if interaction and interaction.get("type") == "command":
                             await send({
                                 "type": "interaction",
@@ -1056,7 +1478,32 @@ async def interaction_ws(websocket: WebSocket):
                             turn_contexts.pop(turn_id, None)
                             asr_adapter.close_session(turn_id, reason="interaction_done")
                             continue
+                        if interaction and interaction.get("type") == "chat":
+                            reply_text = str(interaction.get("audio_text") or "").strip()
+                            use_fast_chat_stream = page == "task" or (page == "home" and 0 < len(reply_text) <= 28)
+                            if use_fast_chat_stream:
+                                if sequence_task:
+                                    sequence_task.cancel()
+                                sequence_task = asyncio.create_task(
+                                    stream_llm_sequence(
+                                        turn_token,
+                                        turn_id,
+                                        transcript,
+                                        "task_chat_voice_fast" if page == "task" else "home_chat_voice_fast",
+                                        enable_tts=bool(reply_text),
+                                        tts_emotion=asr_result.get("emotion", "neutral"),
+                                        task_type="stream_chat_voice_task" if page == "task" else "stream_chat_voice_fast",
+                                        chunk_stream=_iter_text_chunks(reply_text, chunk_size=5),
+                                        text_source="task_fast_reply" if page == "task" else "home_fast_reply",
+                                        done_reason="interaction_chat",
+                                    )
+                                )
+                                continue
                         if interaction and interaction.get("type") == "breakdown":
+                            print(
+                                f"[VoicePerf] page={page} turn_id={turn_id} "
+                                f"breakdown_fastpath_start_ms={int((time.perf_counter() - buffer['start']) * 1000)}"
+                            )
                             await send({
                                 "type": "interaction",
                                 "turn_id": turn_id,
@@ -1066,6 +1513,10 @@ async def interaction_ws(websocket: WebSocket):
                                 "stream_kind": "breakdown",
                             })
                             print(f"[VoiceBreakdownStream] intent=breakdown turn_id={turn_id} page={page}")
+                            print(
+                                f"[VoicePerf] page={page} turn_id={turn_id} "
+                                f"stream_breakdown_start_ms={int((time.perf_counter() - buffer['start']) * 1000)}"
+                            )
                             if sequence_task:
                                 sequence_task.cancel()
                             sequence_task = asyncio.create_task(
@@ -1087,10 +1538,16 @@ async def interaction_ws(websocket: WebSocket):
                             )
                             continue
                     if page == "focus":
-                        focus_turn = await build_focus_voice_turn(
+                        focus_route_start = time.perf_counter()
+                        focus_turn = await build_focus_turn(
                             transcript,
                             asr_result.get("emotion", "neutral"),
                             turn_contexts.get(turn_id),
+                        )
+                        print(f"[VoicePerf] page=focus turn_id={turn_id} intent_done_ms={int((time.perf_counter() - focus_route_start) * 1000)} intent={focus_turn.get('mode', 'focus_stream')}")
+                        print(
+                            f"[VoicePerf] page=focus turn_id={turn_id} "
+                            f"llm_path={focus_turn.get('llm_path', 'fast_template')}"
                         )
                         if focus_turn.get("mode") == "interaction":
                             await send({
@@ -1130,13 +1587,17 @@ async def interaction_ws(websocket: WebSocket):
                                 "focus_voice",
                                 enable_tts=True,
                                 tts_emotion=focus_turn.get("tts_emotion", "neutral"),
-                                task_type="stream_focus_voice",
-                                chunk_stream=stream_focus_reply(
+                                task_type=focus_turn.get("reply_task_type", "stream_focus_voice"),
+                                chunk_stream=focus_turn.get("chunk_stream") or stream_focus_reply(
                                     focus_turn.get("purpose", "continue"),
                                     task_text=focus_turn.get("task_text", ""),
                                     user_reply=focus_turn.get("user_text", transcript),
                                     history=focus_turn.get("history") or [],
-                                    task_type="stream_focus_voice",
+                                    reply_override=focus_turn.get("reply_text", ""),
+                                    focus_goal=focus_turn.get("focus_goal", ""),
+                                    todo_snapshot=focus_turn.get("todo_snapshot") or [],
+                                    page="focus",
+                                    task_type=focus_turn.get("reply_task_type", "stream_focus_voice"),
                                 ),
                                 on_complete_text=focus_turn.get("on_complete_text"),
                             )
@@ -1278,6 +1739,7 @@ async def chat_stream(request: ChatRequest):
         try:
             async for chunk in stream_chat_reply(
                 request.message,
+                context=request.context,
                 task_type="stream_chat_text",
             ):
                 if not chunk:
@@ -1305,7 +1767,75 @@ async def chat_stream(request: ChatRequest):
 async def intent(request: IntentRequest):
     """Text intent routing (no ASR)."""
     try:
-        return await process_user_intent(request.text, request.emotion)
+        return await process_user_intent(request.text, request.emotion, page=request.page)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/focus-text")
+async def focus_text(request: FocusTextRequest):
+    """Focus text routing using the same fast/llm focus path as voice."""
+    try:
+        focus_turn = await build_focus_turn(
+            request.text,
+            request.emotion or "neutral",
+            request.context or {},
+        )
+        if focus_turn.get("mode") == "interaction":
+            return {
+                "type": "interaction",
+                "user_text": focus_turn.get("user_text") or request.text,
+                "interaction": focus_turn.get("interaction"),
+            }
+
+        reply_parts: List[str] = []
+        chunk_stream = focus_turn.get("chunk_stream")
+        if chunk_stream is None:
+            chunk_stream = stream_focus_reply(
+                focus_turn.get("purpose", "continue"),
+                task_text=focus_turn.get("task_text", ""),
+                user_reply=focus_turn.get("user_text", request.text),
+                history=focus_turn.get("history") or [],
+                reply_override=focus_turn.get("reply_text", ""),
+                focus_goal=focus_turn.get("focus_goal", ""),
+                todo_snapshot=focus_turn.get("todo_snapshot") or [],
+                page="focus",
+                task_type=focus_turn.get("reply_task_type", "stream_focus_voice"),
+            )
+
+        if hasattr(chunk_stream, "__aiter__"):
+            async for chunk in chunk_stream:
+                if chunk:
+                    reply_parts.append(chunk)
+        else:
+            for chunk in chunk_stream:
+                if chunk:
+                    reply_parts.append(chunk)
+
+        reply = "".join(reply_parts).strip()
+        on_complete_text = focus_turn.get("on_complete_text")
+        if reply and callable(on_complete_text):
+            callback_result = on_complete_text(reply)
+            if asyncio.iscoroutine(callback_result):
+                await callback_result
+
+        audio_payload = None
+        if reply:
+            audio = await audio_service.speak(reply, focus_turn.get("tts_emotion", "neutral"))
+            audio_payload = {
+                "base64": audio.get("audio_data", ""),
+                "format": audio.get("format", "mp3"),
+            }
+
+        return {
+            "type": "focus_reply",
+            "user_text": focus_turn.get("user_text") or request.text,
+            "reply": reply,
+            "audio": audio_payload,
+            "focus_state": focus_turn.get("focus_state") or {},
+            "route_category": focus_turn.get("focus_route_category"),
+            "llm_path": focus_turn.get("llm_path", "fast_template"),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

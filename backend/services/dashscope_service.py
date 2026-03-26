@@ -10,12 +10,23 @@ from dashscope import Generation
 from dashscope.api_entities.dashscope_response import GenerationResponse
 from config import settings
 from demo_task_breakdown import get_demo_task_breakdown
+from services.fast_route_utils import check_greeting_utterance
 
 
 class DashScopeService:
     """DashScope Qwen-Max 服务"""
 
-    _LIGHT_TASKS = {"classify_intent", "summarize_breakdown"}
+    _LIGHT_TASKS = {
+        "classify_intent",
+        "summarize_breakdown",
+        "summarize_title",
+        "generate_reply_from_asr_task",
+        "generate_reply_from_asr_focus",
+        "stream_breakdown_voice",
+        "stream_focus_voice",
+        "stream_chat_voice_task",
+        "stream_chat_voice_fast",
+    }
     _TEXT_STREAM_TASKS = {"stream_chat_text"}
 
     def __init__(self):
@@ -45,6 +56,8 @@ class DashScopeService:
             else:
                 model = self.light_model
                 print("[QwenRoute] text_flash=off fallback=light")
+        elif task_type == "stream_focus_llm_answer":
+            model = self.model
         elif task_type == "stream_chat_voice":
             model = self.model
         elif task_type in self._LIGHT_TASKS:
@@ -53,6 +66,53 @@ class DashScopeService:
             model = self.model
         self._log_route(task_type, model, routing_enabled=True)
         return model
+
+    def _get_fast_reply_template(self, user_text: str, page: str = "home") -> Optional[str]:
+        text = (user_text or "").strip()
+        text_lower = text.lower()
+        if not text:
+            return None
+        greeting_match = check_greeting_utterance(text)
+
+        if greeting_match.get("matched") == "true":
+            if page == "home":
+                return "你好呀，今天想做什么？我陪你一起。"
+            if page == "task":
+                return "你好，我们先看今天这一步。"
+
+        if any(word in text_lower for word in ["谢", "谢谢"]):
+            return "不客气，我们继续。"
+
+        if page == "task":
+            if text in {"好", "好的", "嗯", "行", "可以", "继续", "开始"}:
+                return "好，我们先看第一步。"
+            if any(word in text_lower for word in ["改", "调整", "换", "重来"]):
+                return "可以，我按这个继续。"
+            if len(text) <= 8 and any(word in text_lower for word in ["不会", "卡住", "太难"]):
+                return "没事，我们把它再拆小一点。"
+
+        if page == "focus":
+            if text in {"好", "好的", "嗯", "行", "继续", "开始"}:
+                return "好，先把这一步做完。"
+            if greeting_match.get("matched") == "true":
+                greeting_kind = greeting_match.get("kind") or "default"
+                if greeting_kind == "present":
+                    return "我在，先把眼前这一步做完。"
+                if greeting_kind == "short":
+                    return "嗨，先回到当前任务。"
+                if greeting_kind == "morning":
+                    return "早安，先回到当前任务。"
+                return "你好呀，我们继续当前任务吧。"
+            if any(word in text_lower for word in ["分心", "走神", "静不下心", "集中不了"]):
+                return "没关系，我们先回到第一步。"
+            if any(word in text_lower for word in ["不知道接下来", "下一步", "先做哪个", "先做什么", "从哪开始"]):
+                return "先看第一条就好。"
+            if any(word in text_lower for word in ["太难", "好难", "不会", "卡住", "做不动"]):
+                return "那我们先把它拆小一点。"
+            if any(word in text_lower for word in ["闪念", "想法", "灵感", "记一下", "记个"]):
+                return "你先记下来，我们再继续。"
+
+        return None
 
     def _call_qwen(
         self,
@@ -232,6 +292,7 @@ class DashScopeService:
             "你是一个意图路由器，只能输出 JSON："
             "{\"intent\":\"chat\"} 或 {\"intent\":\"breakdown\"}。"
             "当用户表达卡住、不会、不知道怎么开始、启动困难、想拆解任务时输出 breakdown；"
+            "当用户表达不知道学什么、不知道先做什么、没方向、想开始但没方向、想学点东西但没想好时，也输出 breakdown；"
             "普通闲聊输出 chat。不要输出任何其他内容。"
         )
 
@@ -273,6 +334,13 @@ class DashScopeService:
             "启动困难",
             "想要拆解",
             "拆解",
+            "不知道学什么",
+            "不知道该学什么",
+            "不知道先做什么",
+            "不知道从哪开始",
+            "没方向",
+            "没有方向",
+            "迷茫",
         ]
         if any(keyword in text_lower for keyword in breakdown_keywords):
             return "breakdown"
@@ -287,6 +355,10 @@ class DashScopeService:
             "作业",
             "项目",
             "汇报",
+            "学点东西",
+            "新东西",
+            "提升",
+            "起步",
         ]
         if any(keyword in text_lower for keyword in extra_breakdown_keywords):
             return "breakdown"
@@ -389,6 +461,7 @@ class DashScopeService:
         self,
         message: str,
         history: Optional[List[Dict[str, str]]] = None,
+        context: Optional[str] = None,
         task_type: Optional[str] = None,
     ) -> Dict[str, str]:
         """
@@ -410,6 +483,8 @@ class DashScopeService:
 """
 
         messages = [{"role": "system", "content": system_prompt}]
+        if context:
+            messages.append({"role": "system", "content": f"附加上下文:\n{context[:800]}"})
         if history:
             for h in history[-6:]:
                 if "user" in h:
@@ -483,10 +558,11 @@ class DashScopeService:
         self,
         message: str,
         history: Optional[List[Dict[str, str]]] = None,
+        context: Optional[str] = None,
         task_type: str = "stream_chat",
     ) -> Iterator[str]:
         """Stream chat reply chunks for SSE test path."""
-        yield from self.chat(message, history, task_type=task_type)
+        yield from self.chat(message, history, context=context, task_type=task_type)
 
     def stream_messages(
         self,
@@ -552,17 +628,43 @@ class DashScopeService:
             if delta:
                 yield delta
 
-    def generate_reply_from_asr(self, user_text: str, user_emotion: str) -> str:
+    def generate_reply_from_asr(self, user_text: str, user_emotion: str, page: str = "home") -> str:
         """
         Generate a short reply for the voice pipeline.
         Emotion is used as context only; TTS emotion is rule-based elsewhere.
         """
-        system_prompt = (
-            "你是 FlowMate，一个温和且坚定的效率伙伴。"
-            "请用中文回复 1-2 句话，简洁、友好、支持用户。"
-            "默认尽量控制在100字以内，必要时可略微超过，"
-            "以自然、完整、口语化为先，避免长篇解释、重复和过度铺垫。"
-        )
+        fast_reply = self._get_fast_reply_template(user_text, page=page)
+        if fast_reply:
+            return fast_reply
+
+        if page == "task":
+            system_prompt = (
+                "你是 FlowMate 的任务页助手。"
+                "请只用1句简短中文推进用户继续，不要寒暄，不要复述用户原话。"
+                "首句控制在8到16个汉字，优先让用户马上开始下一步。"
+            )
+            max_tokens = 40
+            temperature = 0.4
+            task_type = "generate_reply_from_asr_task"
+        elif page == "focus":
+            system_prompt = (
+                "你是 FlowMate 的专注助手。"
+                "请只用1句简短中文提醒或承接用户，首句控制在8到16个汉字。"
+                "不要寒暄，不要解释太多，只推动用户继续当前任务。"
+            )
+            max_tokens = 36
+            temperature = 0.3
+            task_type = "generate_reply_from_asr_focus"
+        else:
+            system_prompt = (
+                "你是 FlowMate，一个温和且坚定的效率伙伴。"
+                "请用中文回复 1-2 句话，简洁、友好、支持用户。"
+                "默认尽量控制在100字以内，必要时可略微超过，"
+                "以自然、完整、口语化为先，避免长篇解释、重复和过度铺垫。"
+            )
+            max_tokens = 120
+            temperature = 0.7
+            task_type = "generate_reply_from_asr"
 
         user_prompt = (
             f"用户情绪（仅供参考）：{user_emotion}\n"
@@ -577,9 +679,9 @@ class DashScopeService:
 
         response = self._call_qwen(
             messages,
-            max_tokens=120,
-            temperature=0.7,
-            task_type="generate_reply_from_asr",
+            max_tokens=max_tokens,
+            temperature=temperature,
+            task_type=task_type,
         )
         if response:
             return response.strip()
@@ -589,6 +691,7 @@ class DashScopeService:
     def _detect_emotion(self, message: str) -> str:
         """简单的情绪检测"""
         message_lower = message.lower()
+        greeting_match = check_greeting_utterance(message)
 
         if any(word in message_lower for word in ["完成", "做完", "搞定", "成功"]):
             return "happy"
@@ -596,7 +699,7 @@ class DashScopeService:
             return "tired"
         if any(word in message_lower for word in ["难", "卡住", "不会", "帮"]):
             return "need_help"
-        if any(word in message_lower for word in ["你好", "hi", "嗨", "早"]):
+        if greeting_match.get("matched") == "true":
             return "greeting"
 
         return "neutral"
@@ -604,6 +707,7 @@ class DashScopeService:
     def _get_fallback_chat(self, message: str) -> str:
         """回退方案：预设聊天回复"""
         message_lower = message.lower()
+        greeting_match = check_greeting_utterance(message)
 
         if any(word in message_lower for word in ["完成", "做完", "搞定"]):
             return "刚才你简直是打字机成精了，给自己一个小奖励吧。"
@@ -611,7 +715,7 @@ class DashScopeService:
             return "知道吗，章鱼有三颗心脏。休息一下，让大脑换个频率。"
         if any(word in message_lower for word in ["难", "卡住"]):
             return "卡住没关系，先深呼吸一下，换个角度试试。"
-        if any(word in message_lower for word in ["你好", "hi", "嗨"]):
+        if greeting_match.get("matched") == "true":
             return "你好呀，今天打算做什么？我陪你一起。"
         if any(word in message_lower for word in ["谢", "谢谢"]):
             return "不客气，继续加油，我在这里陪着你。"

@@ -41,10 +41,15 @@ class Settings(BaseModel):
     SENSEVOICE_MODEL: str = os.getenv("SENSEVOICE_MODEL", "sensevoice-v1")
     ASR_STREAM_MODEL: str = os.getenv("ASR_STREAM_MODEL", "paraformer-realtime-v2")
     ASR_STREAM_MODEL_INTL: str = os.getenv("ASR_STREAM_MODEL_INTL", "fun-asr-realtime")
-    ASR_STREAM_REGION: str = os.getenv("ASR_STREAM_REGION", "auto")
+    ASR_STREAM_REGION: str = os.getenv("ASR_STREAM_REGION", "intl")
+    ASR_STREAM_DEFAULT_REGION: str = os.getenv("ASR_STREAM_DEFAULT_REGION", "intl")
+    ASR_STREAM_ENDPOINT: str = os.getenv("ASR_STREAM_ENDPOINT", "")
     SENSEVOICE_SAMPLE_RATE: int = int(os.getenv("SENSEVOICE_SAMPLE_RATE", "16000"))
     SENSEVOICE_AUDIO_FORMAT: str = os.getenv("SENSEVOICE_AUDIO_FORMAT", "wav")
     SENSEVOICE_TIMEOUT_SECONDS: int = int(os.getenv("SENSEVOICE_TIMEOUT_SECONDS", "20"))
+
+    TTS_WARMUP_ENABLED: bool = os.getenv("TTS_WARMUP_ENABLED", "true").lower() == "true"
+    TTS_PRELOAD_COMMON_TEXTS: bool = os.getenv("TTS_PRELOAD_COMMON_TEXTS", "true").lower() == "true"
 
     # 功能开关
     ENABLE_CAMERA: bool = os.getenv("ENABLE_CAMERA", "true").lower() == "true"

@@ -26,7 +26,14 @@ type ResizeState = {
   axis?: 'width' | 'height';
 };
 
-type MiniTodoCardState = 'front' | 'back' | 'peek-prev' | 'peek-next' | 'hidden';
+type MiniTodoCardState =
+  | 'front'
+  | 'back'
+  | 'enter-forward'
+  | 'leave-forward'
+  | 'enter-backward'
+  | 'leave-backward'
+  | 'hidden';
 
 type MiniInputEvent = React.MouseEvent<HTMLInputElement> | React.KeyboardEvent<HTMLInputElement>;
 
@@ -159,17 +166,21 @@ const MiniTodoCard = ({
   onNextPage: () => void;
   onSelectPage: (index: number) => void;
 }) => {
-  const isFront = cardState === 'front';
-  const canActivate = cardState !== 'hidden';
+  const isFront = cardState === 'front' || cardState === 'enter-forward' || cardState === 'enter-backward';
+  const canActivate = cardState === 'back';
   const cardStateClass =
     cardState === 'front'
       ? 'is-front'
       : cardState === 'back'
         ? 'is-back'
-        : cardState === 'peek-prev'
-          ? 'is-peek-prev'
-          : cardState === 'peek-next'
-            ? 'is-peek-next'
+        : cardState === 'enter-forward'
+          ? 'is-enter-forward'
+          : cardState === 'leave-forward'
+            ? 'is-leave-forward'
+            : cardState === 'enter-backward'
+              ? 'is-enter-backward'
+              : cardState === 'leave-backward'
+                ? 'is-leave-backward'
             : 'is-hidden';
   return (
   <div
@@ -249,7 +260,7 @@ const MiniTodoCard = ({
         </li>
       ))}
     </ul>
-    {pageCount > 1 && cardState !== 'hidden' && (
+    {pageCount > 1 && isFront && (
       <div className="mini-todo-pager" onClick={stopMiniInputEvent} onKeyDown={stopMiniInputEvent}>
         <button
           className="mini-page-arrow"
@@ -428,6 +439,11 @@ const MiniApp: React.FC = () => {
   const [memos, setMemos] = useState<MemoItem[]>(() => readMemos().slice(-3));
   const [memoDoneIds, setMemoDoneIds] = useState<Set<string>>(() => new Set());
   const [activePanel, setActivePanel] = useState<MiniPanel>('todo');
+  const [todoPageSwitchState, setTodoPageSwitchState] = useState<{
+    enteringId: string;
+    leavingId: string;
+    direction: 'forward' | 'backward';
+  } | null>(null);
   const todoPagesStorageRef = useRef(
     initialTodoPagesState ? serializeTodoPagesState(initialTodoPagesState) : '',
   );
@@ -436,6 +452,8 @@ const MiniApp: React.FC = () => {
   const memoUpdateSeenRef = useRef(false);
   const lastTodoPagesKeyRef = useRef<string | null>(null);
   const todoPagesUpdateSeenRef = useRef(false);
+  const previousSelectedTodoBoardIdRef = useRef(selectedTodoBoardId);
+  const todoPageSwitchTimeoutRef = useRef<number | null>(null);
   const memoItems = useMemo<MemoListItem[]>(
     () => memos.map((memo) => ({ ...memo, id: memo.created_at })),
     [memos],
@@ -473,6 +491,50 @@ const MiniApp: React.FC = () => {
       setSelectedTodoBoardId(currentBoardId || todoPages[todoPages.length - 1]?.id || '');
     }
   }, [currentBoardId, selectedTodoBoardId, todoPages]);
+
+  useEffect(() => {
+    if (activePanel !== 'todo') {
+      previousSelectedTodoBoardIdRef.current = selectedTodoBoardId;
+      if (todoPageSwitchState) {
+        setTodoPageSwitchState(null);
+      }
+      return;
+    }
+    const previousBoardId = previousSelectedTodoBoardIdRef.current;
+    if (!previousBoardId || !selectedTodoBoardId || previousBoardId === selectedTodoBoardId) {
+      previousSelectedTodoBoardIdRef.current = selectedTodoBoardId;
+      return;
+    }
+    const previousIndex = todoPages.findIndex((board) => board.id === previousBoardId);
+    const nextIndex = todoPages.findIndex((board) => board.id === selectedTodoBoardId);
+    if (previousIndex === -1 || nextIndex === -1) {
+      previousSelectedTodoBoardIdRef.current = selectedTodoBoardId;
+      return;
+    }
+    const direction: 'forward' | 'backward' = nextIndex < previousIndex ? 'backward' : 'forward';
+    setTodoPageSwitchState({
+      enteringId: selectedTodoBoardId,
+      leavingId: previousBoardId,
+      direction,
+    });
+    if (todoPageSwitchTimeoutRef.current) {
+      window.clearTimeout(todoPageSwitchTimeoutRef.current);
+    }
+    todoPageSwitchTimeoutRef.current = window.setTimeout(() => {
+      setTodoPageSwitchState((current) => (
+        current && current.enteringId === selectedTodoBoardId ? null : current
+      ));
+      todoPageSwitchTimeoutRef.current = null;
+    }, 420);
+    previousSelectedTodoBoardIdRef.current = selectedTodoBoardId;
+  }, [activePanel, selectedTodoBoardId, todoPages]);
+
+  useEffect(() => () => {
+    if (todoPageSwitchTimeoutRef.current) {
+      window.clearTimeout(todoPageSwitchTimeoutRef.current);
+      todoPageSwitchTimeoutRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     document.body.classList.add('mini-mode');
@@ -883,15 +945,14 @@ const MiniApp: React.FC = () => {
           <div className="mini-stack">
             {renderedTodoPages.map((board, index) => {
               const isSelectedTodoPage = board.id === (selectedTodoBoard?.id ?? 'mini-empty-board');
-              const isNeighborPrev = activePanel === 'todo' && index === selectedTodoPageIndex - 1;
-              const isNeighborNext = activePanel === 'todo' && index === selectedTodoPageIndex + 1;
-              const cardState: MiniTodoCardState = isSelectedTodoPage
-                ? (activePanel === 'todo' ? 'front' : 'back')
-                : isNeighborPrev
-                  ? 'peek-prev'
-                  : isNeighborNext
-                    ? 'peek-next'
-                    : 'hidden';
+              let cardState: MiniTodoCardState = 'hidden';
+              if (todoPageSwitchState?.enteringId === board.id && activePanel === 'todo') {
+                cardState = todoPageSwitchState.direction === 'forward' ? 'enter-forward' : 'enter-backward';
+              } else if (todoPageSwitchState?.leavingId === board.id && activePanel === 'todo') {
+                cardState = todoPageSwitchState.direction === 'forward' ? 'leave-forward' : 'leave-backward';
+              } else if (isSelectedTodoPage) {
+                cardState = activePanel === 'todo' ? 'front' : 'back';
+              }
               return (
                 <MiniTodoCard
                   key={board.id}

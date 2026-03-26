@@ -17,11 +17,11 @@ DIGITAL_MEDIA_PAPER_DEMO = DemoTaskBreakdown(
     trigger="数字媒体论文",
     title="数媒起稿",
     steps=(
-        "搜索一个相关论文",
+        "搜索一个数媒选题视频",
         "记录相关灵感",
         "列三节提纲",
     ),
-    summary="放轻松，我们先找到一篇相关论文就行，后面两步会顺很多。",
+    summary="放轻松，我们先看看网上的视频了解一下论文选题，后面两步会顺很多。",
 )
 
 

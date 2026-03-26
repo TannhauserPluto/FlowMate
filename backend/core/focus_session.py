@@ -23,6 +23,7 @@ class FocusSession:
     consecutive_distract: int = 0
     consecutive_fatigue: int = 0
     awaiting_rest_response: bool = False
+    demo_force_rest_flow: bool = False
     memory: List[Dict[str, str]] = field(default_factory=list)
 
 

@@ -291,15 +291,12 @@ async def fatigue_check(request: FatigueCheckRequest):
         session.last_fatigue_ok = False
         session.consecutive_fatigue = 1
         session.awaiting_rest_response = True
+        session.demo_force_rest_flow = True
         print(
             f"[Focus] fatigue-check override=session={request.session_id} "
             f"mode={override_mode} level={fatigue_level}"
         )
-        reply = await agent_brain.generate_focus_message(
-            "ask_rest",
-            task_text=session.task_text,
-            history=session.memory,
-        )
+        reply = "感觉你有点疲劳了，要不要休息一下？"
         focus_session_manager.record_message(session.id, "assistant", reply)
         audio = await audio_service.speak(reply, "neutral")
         return FatigueCheckResponse(
@@ -379,10 +376,28 @@ async def fatigue_response(request: FatigueResponseRequest):
         raise HTTPException(status_code=404, detail="session not found")
 
     print(f"[Focus] fatigue-response session={request.session_id} accept={request.accept_rest}")
+    if session.demo_force_rest_flow:
+        user_text = request.user_text or "休息"
+        focus_session_manager.record_message(session.id, "user", user_text)
+        session.awaiting_rest_response = False
+        session.demo_force_rest_flow = False
+        reply = "休息是为了接下来更好的继续哦。"
+        focus_session_manager.record_message(session.id, "assistant", reply)
+        audio = await audio_service.speak(reply, "neutral")
+        return {
+            "action": "end_focus",
+            "reply": reply,
+            "audio": {
+                "base64": audio.get("audio_data", ""),
+                "format": audio.get("format", "mp3"),
+            },
+        }
+
     user_text = request.user_text or ("休息" if request.accept_rest else "继续")
     focus_session_manager.record_message(session.id, "user", user_text)
 
     if request.accept_rest:
+        session.demo_force_rest_flow = False
         reply = await agent_brain.generate_focus_message(
             "end_focus",
             task_text=session.task_text,
@@ -409,6 +424,7 @@ async def fatigue_response(request: FatigueResponseRequest):
     focus_session_manager.record_message(session.id, "assistant", reply)
     audio = await audio_service.speak(reply, "neutral")
     session.awaiting_rest_response = False
+    session.demo_force_rest_flow = False
     return {
         "action": "continue",
         "reply": reply,

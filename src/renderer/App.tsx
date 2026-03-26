@@ -73,6 +73,36 @@ type TaskMessage = {
   text: string;
 };
 
+type TaskPendingAction = {
+  kind: 'reprioritize' | 'edit_todo';
+  targetIndex: number | null;
+  direction?: 'front' | 'end';
+};
+
+type TaskFastRouteCategory = 'confirm' | 'reprioritize' | 'edit_todo' | 'new_task' | 'need_llm';
+
+type TaskFastRouteContext = {
+  topic: string;
+  todoItems: TodoItem[];
+  todoSnapshot: string[];
+  lastMeaningfulInput: string;
+  lastBreakdownResult: string[];
+  pendingAction: TaskPendingAction | null;
+  hasActiveTask: boolean;
+};
+
+type TaskFastRouteResult = {
+  category: TaskFastRouteCategory;
+  reason: string;
+  usingLocalUpdate: boolean;
+  usingLocalReply: boolean;
+  escalateToLlm: boolean;
+  targetIndex?: number;
+  replacementText?: string;
+  direction?: 'front' | 'end';
+  matchedText?: string;
+};
+
 type VoiceWsPage = 'home' | 'task' | 'focus';
 
 type StreamingVoiceInteractionOptions = {
@@ -95,6 +125,67 @@ const DEFAULT_TODO_TEXTS = [
   '明确论文基本信息',
   '头脑风暴 3–5 个可写选题',
   '搜索并筛选文献',
+];
+const TASK_CONFIRM_EXACT = new Set([
+  '好',
+  '好的',
+  '嗯',
+  '嗯嗯',
+  '行',
+  '可以',
+  '就这样',
+  '按这个来',
+  '按这个',
+  '就这么办',
+  '收到',
+  '知道了',
+]);
+const TASK_COMPLEX_QUERY_KEYWORDS = [
+  '怎么',
+  '如何',
+  '为什么',
+  '合理',
+  '是不是',
+  '建议',
+  '你觉得',
+  '能不能',
+  '可不可以',
+  '要不要',
+  '太笼统',
+  '更容易开始',
+  '更合适',
+  '帮我',
+  '不知道该先',
+  '不知道先',
+  '先做哪个',
+  '应该先',
+  '拆得',
+];
+const TASK_NEW_TASK_PREFIXES = [
+  '我今天要',
+  '我要完成',
+  '我要做',
+  '今天要做',
+  '今天要完成',
+  '我得完成',
+  '帮我拆',
+  '帮我规划',
+  '重新拆',
+  '重新来',
+  '换个任务',
+  '另一个任务',
+  '新增任务',
+  '新任务',
+];
+const TASK_FRONT_MOVE_PREFIXES = ['先做', '先看', '先弄', '先处理', '先搞', '先写', '先把', '就'];
+const TASK_END_MOVE_MARKERS = ['先不做', '放后面', '往后放', '后面再做', '先往后', '暂时不做'];
+const TASK_REPLACE_MARKERS = ['改成', '换成', '改为', '调整成', '改一下', '换一下'];
+const TASK_REMOVE_MARKERS = ['删掉', '删除', '去掉', '清空', '移除'];
+const TASK_ROUTE_PUNCTUATION_RE = /[\s，。！？、,.!?;；:：'"“”‘’（）()【】\[\]<>《》~～]/g;
+const TASK_ORDINAL_PATTERNS: Array<{ index: number; patterns: string[] }> = [
+  { index: 0, patterns: ['第一条', '第1条', '第一项', '第1项', '第一步', '第1步', '第一个', '第1个', '第一'] },
+  { index: 1, patterns: ['第二条', '第2条', '第二项', '第2项', '第二步', '第2步', '第二个', '第2个', '第二'] },
+  { index: 2, patterns: ['第三条', '第3条', '第三项', '第3项', '第三步', '第3步', '第三个', '第3个', '第三'] },
 ];
 const BREAK_DEFAULT_SECONDS = 5 * 60;
 const BREAK_DEFAULT_MESSAGE = '恭喜你完成专注，休息五分钟吧';
@@ -268,6 +359,304 @@ const summarizeTopic = (userText: string, tasks: string[]) => {
   return fallback;
 };
 
+const compactTaskRouteText = (text: string) =>
+  sanitizeText(text)
+    .toLowerCase()
+    .replace(TASK_ROUTE_PUNCTUATION_RE, '');
+
+const getTaskTodoSnapshot = (items: TodoItem[]) =>
+  normalizeTodoItems(items)
+    .map((item) => sanitizeText(item.text))
+    .filter(Boolean)
+    .slice(0, 3);
+
+const resolveTaskOrdinalIndex = (text: string) => {
+  const compact = compactTaskRouteText(text);
+  const match = TASK_ORDINAL_PATTERNS.find(({ patterns }) => patterns.some((pattern) => compact.includes(pattern)));
+  return match ? match.index : null;
+};
+
+const buildTaskTextBigrams = (text: string) => {
+  const compact = compactTaskRouteText(text);
+  const grams = new Set<string>();
+  for (let index = 0; index < compact.length - 1; index += 1) {
+    const gram = compact.slice(index, index + 2);
+    if (gram.trim()) grams.add(gram);
+  }
+  return [...grams];
+};
+
+const scoreTaskTodoMatch = (hint: string, todoText: string) => {
+  const compactHint = compactTaskRouteText(hint);
+  const compactTodo = compactTaskRouteText(todoText);
+  if (!compactHint || !compactTodo) return 0;
+  if (compactTodo === compactHint) return 100;
+  if (compactTodo.includes(compactHint) || compactHint.includes(compactTodo)) return 80;
+  const bigrams = buildTaskTextBigrams(compactHint);
+  if (!bigrams.length) return 0;
+  return bigrams.reduce((score, gram) => (compactTodo.includes(gram) ? score + 1 : score), 0);
+};
+
+const getDefaultTaskTargetIndex = (
+  todoItems: TodoItem[],
+  pendingAction: TaskPendingAction | null,
+) => {
+  if (pendingAction?.targetIndex !== null && pendingAction?.targetIndex !== undefined) {
+    return pendingAction.targetIndex;
+  }
+  const normalized = normalizeTodoItems(todoItems);
+  const firstFilledIndex = normalized.findIndex((item) => Boolean(sanitizeText(item.text)));
+  return firstFilledIndex >= 0 ? firstFilledIndex : null;
+};
+
+const findTaskTodoIndexByHint = (
+  hint: string,
+  todoItems: TodoItem[],
+  pendingAction: TaskPendingAction | null,
+) => {
+  const explicitOrdinalIndex = resolveTaskOrdinalIndex(hint);
+  if (explicitOrdinalIndex !== null) return explicitOrdinalIndex;
+
+  const compactHint = compactTaskRouteText(hint);
+  if (!compactHint) return getDefaultTaskTargetIndex(todoItems, pendingAction);
+
+  if (['这个', '那个', '就这个', '就那个', '先这个', '先那个'].includes(compactHint)) {
+    return getDefaultTaskTargetIndex(todoItems, pendingAction);
+  }
+  if (compactHint.includes('前面那个') || compactHint.includes('前面的') || compactHint.includes('前面')) {
+    const firstFilledIndex = normalizeTodoItems(todoItems).findIndex((item) => Boolean(sanitizeText(item.text)));
+    return firstFilledIndex >= 0 ? firstFilledIndex : getDefaultTaskTargetIndex(todoItems, pendingAction);
+  }
+  if (compactHint.includes('后面那个') || compactHint.includes('后面的') || compactHint.includes('后面')) {
+    const normalized = normalizeTodoItems(todoItems);
+    for (let index = normalized.length - 1; index >= 0; index -= 1) {
+      if (sanitizeText(normalized[index]?.text || '')) return index;
+    }
+    return getDefaultTaskTargetIndex(todoItems, pendingAction);
+  }
+
+  let bestIndex: number | null = null;
+  let bestScore = 0;
+  normalizeTodoItems(todoItems).forEach((item, index) => {
+    const score = scoreTaskTodoMatch(hint, item.text);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  });
+  return bestScore > 0 ? bestIndex : null;
+};
+
+const reorderTaskTodoItems = (
+  items: TodoItem[],
+  targetIndex: number,
+  direction: 'front' | 'end',
+) => {
+  const normalized = normalizeTodoItems(items);
+  const filled = normalized.filter((item) => Boolean(sanitizeText(item.text)));
+  const empties = normalized.filter((item) => !sanitizeText(item.text));
+  const filledIndex = filled.findIndex((item) => item.id === normalized[targetIndex]?.id);
+  if (filledIndex < 0) return normalized;
+  const nextFilled = [...filled];
+  const [target] = nextFilled.splice(filledIndex, 1);
+  if (!target) return normalized;
+  if (direction === 'front') {
+    nextFilled.unshift(target);
+  } else {
+    nextFilled.push(target);
+  }
+  return normalizeTodoItems([...nextFilled, ...empties]);
+};
+
+const replaceTaskTodoItemText = (
+  items: TodoItem[],
+  targetIndex: number,
+  nextText: string,
+) => {
+  const normalized = normalizeTodoItems(items).map((item, index) => (
+    index === targetIndex ? { ...item, text: sanitizeText(nextText) } : item
+  ));
+  const filled = normalized.filter((item) => Boolean(sanitizeText(item.text)));
+  const empties = normalized.filter((item) => !sanitizeText(item.text));
+  return normalizeTodoItems([...filled, ...empties]);
+};
+
+const parseTaskEditRoute = (
+  text: string,
+  context: TaskFastRouteContext,
+): TaskFastRouteResult | null => {
+  const cleaned = sanitizeText(text);
+  for (const marker of TASK_REPLACE_MARKERS) {
+    const markerIndex = cleaned.indexOf(marker);
+    if (markerIndex < 0) continue;
+    const rawTargetHint = sanitizeText(cleaned.slice(0, markerIndex).replace(/^(把|将)/, ''));
+    const replacementText = sanitizeText(cleaned.slice(markerIndex + marker.length));
+    if (!replacementText) continue;
+    const targetIndex = rawTargetHint
+      ? findTaskTodoIndexByHint(rawTargetHint, context.todoItems, context.pendingAction)
+      : getDefaultTaskTargetIndex(context.todoItems, context.pendingAction);
+    if (targetIndex === null || targetIndex === undefined) return null;
+    return {
+      category: 'edit_todo',
+      reason: rawTargetHint ? 'replace_targeted_todo' : 'replace_default_target_todo',
+      usingLocalUpdate: true,
+      usingLocalReply: true,
+      escalateToLlm: false,
+      targetIndex,
+      replacementText,
+    };
+  }
+
+  for (const marker of TASK_REMOVE_MARKERS) {
+    const markerIndex = cleaned.indexOf(marker);
+    if (markerIndex < 0) continue;
+    const rawTargetHint = sanitizeText(cleaned.slice(0, markerIndex).replace(/^(把|将)/, ''));
+    const targetIndex = rawTargetHint
+      ? findTaskTodoIndexByHint(rawTargetHint, context.todoItems, context.pendingAction)
+      : getDefaultTaskTargetIndex(context.todoItems, context.pendingAction);
+    if (targetIndex === null || targetIndex === undefined) return null;
+    return {
+      category: 'edit_todo',
+      reason: 'clear_todo_slot',
+      usingLocalUpdate: true,
+      usingLocalReply: true,
+      escalateToLlm: false,
+      targetIndex,
+      replacementText: '',
+    };
+  }
+
+  return null;
+};
+
+const parseTaskReprioritizeRoute = (
+  text: string,
+  context: TaskFastRouteContext,
+): TaskFastRouteResult | null => {
+  const cleaned = sanitizeText(text);
+  const compact = compactTaskRouteText(cleaned);
+
+  for (const marker of TASK_END_MOVE_MARKERS) {
+    const markerIndex = cleaned.indexOf(marker);
+    if (markerIndex < 0) continue;
+    const rawTargetHint = sanitizeText(cleaned.slice(0, markerIndex).replace(/^(把|将)/, ''));
+    const targetIndex = findTaskTodoIndexByHint(rawTargetHint || '后面那个', context.todoItems, context.pendingAction);
+    if (targetIndex === null || targetIndex === undefined) continue;
+    return {
+      category: 'reprioritize',
+      reason: 'move_todo_to_end',
+      usingLocalUpdate: true,
+      usingLocalReply: true,
+      escalateToLlm: false,
+      targetIndex,
+      direction: 'end',
+    };
+  }
+
+  for (const prefix of TASK_FRONT_MOVE_PREFIXES) {
+    if (!compact.startsWith(compactTaskRouteText(prefix))) continue;
+    const rawTargetHint = sanitizeText(cleaned.slice(prefix.length));
+    const targetIndex = findTaskTodoIndexByHint(rawTargetHint || '前面那个', context.todoItems, context.pendingAction);
+    if (targetIndex === null || targetIndex === undefined) continue;
+    return {
+      category: 'reprioritize',
+      reason: 'move_todo_to_front',
+      usingLocalUpdate: true,
+      usingLocalReply: true,
+      escalateToLlm: false,
+      targetIndex,
+      direction: 'front',
+    };
+  }
+
+  if (compact.includes('就第一条') || compact.includes('就第一项') || compact.includes('就第一步')) {
+    return {
+      category: 'reprioritize',
+      reason: 'explicit_first_item',
+      usingLocalUpdate: true,
+      usingLocalReply: true,
+      escalateToLlm: false,
+      targetIndex: 0,
+      direction: 'front',
+    };
+  }
+
+  return null;
+};
+
+const classifyTaskInputFast = (
+  text: string,
+  context: TaskFastRouteContext,
+): TaskFastRouteResult => {
+  const cleaned = sanitizeText(text);
+  const compact = compactTaskRouteText(cleaned);
+  const hasTaskContext = context.hasActiveTask && context.todoSnapshot.length > 0;
+  if (hasTaskContext && TASK_CONFIRM_EXACT.has(compact)) {
+    return {
+      category: 'confirm',
+      reason: 'short_confirm',
+      usingLocalUpdate: false,
+      usingLocalReply: true,
+      escalateToLlm: false,
+    };
+  }
+
+  if (hasTaskContext) {
+    const editRoute = parseTaskEditRoute(cleaned, context);
+    if (editRoute) return editRoute;
+    const reprioritizeRoute = parseTaskReprioritizeRoute(cleaned, context);
+    if (reprioritizeRoute) return reprioritizeRoute;
+  }
+
+  if (!context.hasActiveTask) {
+    return {
+      category: 'new_task',
+      reason: 'no_active_task_context',
+      usingLocalUpdate: false,
+      usingLocalReply: false,
+      escalateToLlm: false,
+    };
+  }
+
+  if (TASK_NEW_TASK_PREFIXES.some((prefix) => compact.startsWith(compactTaskRouteText(prefix)))) {
+    return {
+      category: 'new_task',
+      reason: 'explicit_new_task_prefix',
+      usingLocalUpdate: false,
+      usingLocalReply: false,
+      escalateToLlm: false,
+    };
+  }
+
+  if (/[?？]/.test(cleaned) || TASK_COMPLEX_QUERY_KEYWORDS.some((keyword) => compact.includes(compactTaskRouteText(keyword)))) {
+    return {
+      category: 'need_llm',
+      reason: 'complex_task_question',
+      usingLocalUpdate: false,
+      usingLocalReply: false,
+      escalateToLlm: true,
+    };
+  }
+
+  if (compact.length >= 14) {
+    return {
+      category: 'need_llm',
+      reason: 'long_task_followup',
+      usingLocalUpdate: false,
+      usingLocalReply: false,
+      escalateToLlm: true,
+    };
+  }
+
+  return {
+    category: 'need_llm',
+    reason: 'ambiguous_task_followup',
+    usingLocalUpdate: false,
+    usingLocalReply: false,
+    escalateToLlm: true,
+  };
+};
+
 const toTotalSeconds = (value: TimeWheelValue) =>
   value.hour * 3600
   + (value.minuteTens * 10 + value.minuteOnes) * 60
@@ -386,6 +775,8 @@ const App: React.FC = () => {
     ttsDone: boolean;
     pendingAudio: number;
     endAudioSent: boolean;
+    playbackInProgress: boolean;
+    transportClosed: boolean;
   }>({
     id: 0,
     socket: null,
@@ -407,6 +798,8 @@ const App: React.FC = () => {
     ttsDone: false,
     pendingAudio: 0,
     endAudioSent: false,
+    playbackInProgress: false,
+    transportClosed: false,
   });
   const speakChunksStateRef = useRef<{
     id: number;
@@ -447,6 +840,12 @@ const App: React.FC = () => {
   const doneRefs = useRef(new Map<string, HTMLLIElement>());
   const todoPositions = useRef(new Map<string, DOMRect>());
   const donePositions = useRef(new Map<string, DOMRect>());
+  const taskTitleRef = useRef(taskTitle);
+  const todoItemsRef = useRef(todoItems);
+  const isInitialTaskLockedRef = useRef(isInitialTaskLocked);
+  const taskLastMeaningfulInputRef = useRef('');
+  const taskLastBreakdownResultRef = useRef<string[]>(getTaskTodoSnapshot(todoItems));
+  const taskPendingActionRef = useRef<TaskPendingAction | null>(null);
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -481,6 +880,18 @@ const App: React.FC = () => {
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
   }, []);
+
+  useEffect(() => {
+    taskTitleRef.current = taskTitle;
+  }, [taskTitle]);
+
+  useEffect(() => {
+    todoItemsRef.current = todoItems;
+  }, [todoItems]);
+
+  useEffect(() => {
+    isInitialTaskLockedRef.current = isInitialTaskLocked;
+  }, [isInitialTaskLocked]);
 
   useEffect(() => {
     try {
@@ -759,6 +1170,9 @@ const App: React.FC = () => {
     setIsCountUp(false);
     setRemainingSeconds(toTotalSeconds(timerValue));
     finishRequestedRef.current = false;
+    taskLastMeaningfulInputRef.current = '';
+    taskLastBreakdownResultRef.current = [];
+    taskPendingActionRef.current = null;
   };
 
   const enterBreakView = (message?: string) => {
@@ -906,6 +1320,32 @@ const App: React.FC = () => {
       wsAudioStateRef.current.recorder ||
       wsAudioStateRef.current.stopRequested);
 
+  const isVoiceTurnPlaybackProtected = (runId?: number) => {
+    const currentState = wsAudioStateRef.current;
+    const activeRunId = typeof runId === 'number' ? runId : currentState.id;
+    const currentAudio = currentState.audio ?? audioPlayerRef.current;
+    const isCurrentWsAudio = Boolean(
+      currentAudio
+      && currentAudio.dataset.source === 'ws_audio'
+      && currentAudio.dataset.wsRunId === String(activeRunId),
+    );
+    const audioPlaying = Boolean(
+      isCurrentWsAudio
+      && currentAudio
+      && Boolean(currentAudio.src)
+      && (!currentAudio.paused || currentAudio.currentTime > 0),
+    );
+    return Boolean(
+      currentState.turnId
+      && (
+        currentState.turnActive
+        || currentState.playbackInProgress
+        || currentState.pendingAudio > 0
+        || audioPlaying
+      ),
+    );
+  };
+
   const setSpeechBubble = (text?: string) => {
     if (!text) return;
     setSpeechBubbleText(wrapTextByWidth(sanitizeText(text)));
@@ -940,7 +1380,7 @@ const App: React.FC = () => {
       return;
     }
     const audio = ensureAudioPlayer();
-    audio.dataset.source = 'other';
+    audio.dataset.source = 'home_welcome';
     audio.dataset.wsRunId = '';
     let blob = await response.blob();
     if (!blob.type) {
@@ -1008,7 +1448,7 @@ const App: React.FC = () => {
     const mime = format === 'wav' ? 'audio/wav' : 'audio/mpeg';
     const audio = ensureAudioPlayer();
     const dataUrl = `data:${mime};base64,${base64}`;
-    audio.dataset.source = 'other';
+    audio.dataset.source = source || 'other';
     audio.dataset.wsRunId = '';
     console.log('[audio] src_set', { source, text, audio_len: base64.length });
     audio.pause();
@@ -1030,7 +1470,7 @@ const App: React.FC = () => {
       : url.startsWith('/api')
         ? url
         : `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
-    audio.dataset.source = 'other';
+    audio.dataset.source = source || 'other';
     audio.dataset.wsRunId = '';
     console.log('[audio] src_set', { source, url: src });
     audio.src = src;
@@ -1273,6 +1713,306 @@ const App: React.FC = () => {
     return null;
   };
 
+  const buildFocusWsContext = () => {
+    const focusGoal = sanitizeText(
+      focusTaskTextRef.current || ((todoItems.length > 0 || doneItems.length > 0) ? taskTitle : '') || '',
+    );
+    const todoSnapshot = todoItems
+      .map((item) => sanitizeText(item.text || ''))
+      .filter(Boolean)
+      .slice(0, 3);
+    return {
+      focus_session_id: focusSessionIdRef.current,
+      remaining_seconds: remainingSecondsRef.current,
+      focus_goal: focusGoal,
+      task_title: sanitizeText(taskTitle || ''),
+      todo_snapshot: todoSnapshot,
+      page: 'focus',
+    };
+  };
+
+  const buildTaskFastContext = (): TaskFastRouteContext => {
+    const topic = sanitizeText(taskTitleRef.current || chatUserText || '');
+    const todoSnapshot = getTaskTodoSnapshot(todoItemsRef.current);
+    const lastMeaningfulInput = sanitizeText(taskLastMeaningfulInputRef.current);
+    const lastBreakdownResult = [...taskLastBreakdownResultRef.current];
+    const context: TaskFastRouteContext = {
+      topic,
+      todoItems: normalizeTodoItems(todoItemsRef.current),
+      todoSnapshot,
+      lastMeaningfulInput,
+      lastBreakdownResult,
+      pendingAction: taskPendingActionRef.current,
+      hasActiveTask: Boolean(isInitialTaskLockedRef.current || topic || todoSnapshot.length),
+    };
+    console.log(`[TaskContext] topic=${(topic || '-').slice(0, 120)}`);
+    console.log(`[TaskContext] todo_snapshot=${(todoSnapshot.join(' | ') || '-').slice(0, 160)}`);
+    console.log(`[TaskContext] last_meaningful_input=${(lastMeaningfulInput || '-').slice(0, 120)}`);
+    return context;
+  };
+
+  const buildTaskLlmContextString = (input: string, context: TaskFastRouteContext) => {
+    const todoSnapshot = context.todoSnapshot.length > 0 ? context.todoSnapshot.join('；') : '暂无';
+    const breakdownSnapshot = context.lastBreakdownResult.length > 0 ? context.lastBreakdownResult.join('；') : '暂无';
+    const pendingAction = context.pendingAction
+      ? `${context.pendingAction.kind}:${context.pendingAction.targetIndex ?? 'none'}:${context.pendingAction.direction ?? 'stay'}`
+      : 'none';
+    return [
+      '当前页面: task',
+      `任务主题: ${context.topic || '未设置'}`,
+      `当前3条todo: ${todoSnapshot}`,
+      `最近一次关键任务输入: ${context.lastMeaningfulInput || '无'}`,
+      `最近一次拆解结果: ${breakdownSnapshot}`,
+      `最近待处理动作: ${pendingAction}`,
+      `用户当前输入: ${sanitizeText(input)}`,
+      '请把它当成 task 页里的连续任务协商：优先结合当前任务和 todo 理解，不要把它当成全新独立聊天。',
+      '回答要求：2到4句内，简短具体，优先给直接建议或明确修改意见；不要长篇闲聊。',
+    ].join('\n');
+  };
+
+  const applyTaskTodoFastUpdate = (
+    nextItems: TodoItem[],
+    nextPendingAction: TaskPendingAction | null,
+  ) => {
+    const normalized = normalizeTodoItems(nextItems);
+    todoItemsRef.current = normalized;
+    setTodoItems(normalized);
+    taskPendingActionRef.current = nextPendingAction;
+  };
+
+  const pushTaskAssistantFastReply = async (
+    reply: string,
+    source: string,
+    options?: { allowDuringWs?: boolean },
+  ) => {
+    const cleanedReply = sanitizeText(reply);
+    if (!cleanedReply) return;
+    appendTaskMessage('assistant', cleanedReply);
+    if (!isInitialTaskLockedRef.current) {
+      setChatAssistantText(cleanedReply);
+      setIsInitialTaskLocked(true);
+    }
+    await speakText(cleanedReply, source, options);
+  };
+
+  const handleTaskBackendIntentInput = async (
+    cleaned: string,
+    options?: { shouldArchive?: boolean },
+  ) => {
+    const shouldArchive = typeof options?.shouldArchive === 'boolean'
+      ? options.shouldArchive
+      : isInitialTaskLockedRef.current;
+    try {
+      const interaction = await requestIntent(cleaned, { page: 'task' });
+      if (interaction?.type === 'command') {
+        await applyInteraction(interaction, cleaned);
+        return;
+      }
+      if (interaction?.type === 'breakdown') {
+        const renderBreakdownAboveBoard = !isInitialTaskLockedRef.current;
+        if (interaction?.audio_text) {
+          const assistantText = sanitizeText(interaction.audio_text);
+          if (renderBreakdownAboveBoard) {
+            setChatUserText(cleaned);
+            setChatAssistantText(assistantText);
+          } else {
+            appendTaskMessage('assistant', assistantText);
+          }
+          if (!isInitialTaskLockedRef.current) {
+            setIsInitialTaskLocked(true);
+          }
+          console.log(`[BreakdownLayout] ${renderBreakdownAboveBoard ? 'render_assistant_above_board' : 'render_assistant_below_board'}`, {
+            source: 'task_contextual_breakdown',
+          });
+          try {
+            const snippet = String(interaction.audio_text ?? '').replace(/\s+/g, ' ').slice(0, 80);
+            const source = 'task_breakdown';
+            if (isWsAudioActive()) {
+              console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
+            } else {
+              console.log('[speak_api] request', { source, text: snippet });
+              const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
+              });
+              if (speakResponse.ok) {
+                const payload = await speakResponse.json();
+                playAudioFromBase64(
+                  payload?.data?.audio?.base64,
+                  payload?.data?.audio?.format,
+                  `speak_api:${source}`,
+                  snippet,
+                );
+              }
+            }
+          } catch {
+            // ignore speak errors
+          }
+        }
+        taskPendingActionRef.current = null;
+        taskLastMeaningfulInputRef.current = cleaned;
+        await generateTasks(cleaned, shouldArchive);
+        return;
+      }
+    } catch {
+      // ignore intent errors
+    }
+    taskLastMeaningfulInputRef.current = cleaned;
+    taskPendingActionRef.current = null;
+    await sendChatMessage(cleaned);
+  };
+
+  const handleTaskContextualInput = async (
+    text: string,
+    options?: {
+      origin?: 'text' | 'voice';
+      appendUserMessage?: boolean;
+      allowDuringWs?: boolean;
+    },
+  ) => {
+    const cleaned = sanitizeText(text);
+    if (!cleaned) return null;
+    if (options?.appendUserMessage) {
+      appendTaskMessage('user', cleaned);
+    }
+
+    const taskContext = buildTaskFastContext();
+    const fastRoute = classifyTaskInputFast(cleaned, taskContext);
+    console.log(`[TaskFastRoute] input=${cleaned.slice(0, 120)}`);
+    console.log(`[TaskFastRoute] category=${fastRoute.category}`);
+
+    if (fastRoute.category === 'confirm') {
+      const firstTodo = getTaskTodoSnapshot(todoItemsRef.current)[0];
+      const reply = taskPendingActionRef.current?.kind === 'reprioritize' && firstTodo
+        ? `好，那我们先从${firstTodo.slice(0, 16)}开始。`
+        : taskContext.todoSnapshot.length > 0
+          ? '好，那就按现在这三步来。'
+          : '好，我们按这个继续。';
+      console.log('[TaskFastRoute] using_local_update=false');
+      console.log('[TaskFastRoute] using_local_reply=true');
+      console.log('[TaskFastRoute] escalate_to_llm=false');
+      await pushTaskAssistantFastReply(reply, `task_fast_${options?.origin || 'text'}_confirm`, {
+        allowDuringWs: options?.allowDuringWs,
+      });
+      return fastRoute;
+    }
+
+    if (fastRoute.category === 'reprioritize' && typeof fastRoute.targetIndex === 'number' && fastRoute.direction) {
+      const currentItems = normalizeTodoItems(todoItemsRef.current);
+      const nextItems = reorderTaskTodoItems(currentItems, fastRoute.targetIndex, fastRoute.direction);
+      const targetItemId = currentItems[fastRoute.targetIndex]?.id;
+      const nextTargetIndex = nextItems.findIndex((item) => item.id === targetItemId);
+      const targetLabel = sanitizeText(
+        nextItems[nextTargetIndex >= 0 ? nextTargetIndex : 0]?.text
+        || currentItems[fastRoute.targetIndex]?.text
+        || `第${fastRoute.targetIndex + 1}条`,
+      );
+      applyTaskTodoFastUpdate(nextItems, {
+        kind: 'reprioritize',
+        targetIndex: nextTargetIndex >= 0 ? nextTargetIndex : 0,
+        direction: fastRoute.direction,
+      });
+      taskLastMeaningfulInputRef.current = cleaned;
+      console.log('[TaskFastRoute] using_local_update=true');
+      console.log('[TaskFastRoute] using_local_reply=true');
+      console.log('[TaskFastRoute] escalate_to_llm=false');
+      await pushTaskAssistantFastReply(
+        fastRoute.direction === 'front'
+          ? `好，那我们先从${targetLabel.slice(0, 16)}开始。`
+          : `行，${targetLabel.slice(0, 16)}先往后放一放。`,
+        `task_fast_${options?.origin || 'text'}_reprioritize`,
+        { allowDuringWs: options?.allowDuringWs },
+      );
+      return fastRoute;
+    }
+
+    if (fastRoute.category === 'edit_todo' && typeof fastRoute.targetIndex === 'number') {
+      const nextItems = replaceTaskTodoItemText(
+        todoItemsRef.current,
+        fastRoute.targetIndex,
+        fastRoute.replacementText ?? '',
+      );
+      const replacementText = sanitizeText(fastRoute.replacementText ?? '');
+      const targetLabel = replacementText || `第${fastRoute.targetIndex + 1}条`;
+      const nextTargetIndex = replacementText
+        ? nextItems.findIndex((item) => sanitizeText(item.text) === replacementText)
+        : null;
+      applyTaskTodoFastUpdate(nextItems, {
+        kind: 'edit_todo',
+        targetIndex: nextTargetIndex ?? fastRoute.targetIndex,
+      });
+      taskLastMeaningfulInputRef.current = cleaned;
+      console.log('[TaskFastRoute] using_local_update=true');
+      console.log('[TaskFastRoute] using_local_reply=true');
+      console.log('[TaskFastRoute] escalate_to_llm=false');
+      await pushTaskAssistantFastReply(
+        replacementText
+          ? `可以，我把第${fastRoute.targetIndex + 1}条改成${targetLabel.slice(0, 18)}。`
+          : `好，我先把第${fastRoute.targetIndex + 1}条空出来。`,
+        `task_fast_${options?.origin || 'text'}_edit`,
+        { allowDuringWs: options?.allowDuringWs },
+      );
+      return fastRoute;
+    }
+
+    if (fastRoute.category === 'need_llm') {
+      const llmContext = buildTaskLlmContextString(cleaned, taskContext);
+      taskLastMeaningfulInputRef.current = cleaned;
+      taskPendingActionRef.current = null;
+      console.log('[TaskFastRoute] using_local_update=false');
+      console.log('[TaskFastRoute] using_local_reply=false');
+      console.log('[TaskFastRoute] escalate_to_llm=true');
+      await sendChatMessage(cleaned, llmContext);
+      return fastRoute;
+    }
+
+    taskLastMeaningfulInputRef.current = cleaned;
+    taskPendingActionRef.current = null;
+    console.log('[TaskFastRoute] using_local_update=false');
+    console.log('[TaskFastRoute] using_local_reply=false');
+    console.log('[TaskFastRoute] escalate_to_llm=false');
+    await handleTaskBackendIntentInput(cleaned, { shouldArchive: isInitialTaskLockedRef.current });
+    return fastRoute;
+  };
+
+  const applyFocusResponseState = (state: any) => {
+    if (!state || typeof state !== 'object') return;
+    const nextSessionId = typeof state.session_id === 'string' ? state.session_id : '';
+    const nextTaskText = sanitizeText(String(state.task_text ?? ''));
+    if (nextSessionId) {
+      setFocusSessionId(nextSessionId);
+      focusSessionIdRef.current = nextSessionId;
+    }
+    if (nextTaskText) {
+      setFocusTaskText(nextTaskText);
+      focusTaskTextRef.current = nextTaskText;
+    }
+    if (typeof state.awaiting_rest_response === 'boolean') {
+      setIsAwaitingRestDecision(state.awaiting_rest_response);
+    }
+    if (state.start_focus_monitors) {
+      scheduleScreenCheck(0);
+      scheduleFatigueCheck(6 * 60 * 1000);
+    }
+    console.log('[FocusText] focus_state_applied', state);
+  };
+
+  const requestFocusTextReply = async (text: string) => {
+    const response = await fetch(`${API_BASE}/interaction/focus-text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        context: buildFocusWsContext(),
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`focus_text_failed_${response.status}`);
+    }
+    return response.json();
+  };
+
   const startFocusSession = async (taskText: string) => {
     const response = await fetch(`${API_BASE}/focus/start`, {
       method: 'POST',
@@ -1303,47 +2043,28 @@ const App: React.FC = () => {
   const handleFocusUserText = async (text: string) => {
     const cleaned = sanitizeText(text);
     if (!cleaned) return;
-    if (hasFlashIdeaKeyword(cleaned)) {
-      try {
-        const interaction = await requestIntent(cleaned);
-        if (interaction?.type === 'command' && interaction.ui_payload?.command === 'save_memo') {
-          await applyInteraction(interaction, cleaned);
-          return;
-        }
-      } catch {
-        // ignore memo intent errors
-      }
-    }
-    if (!focusSessionId) {
-      await startFocusSession(cleaned);
+    const data = await requestFocusTextReply(cleaned);
+    console.log('[FocusText] route_result', {
+      llmPath: data?.llm_path,
+      routeCategory: data?.route_category,
+    });
+    if (data?.type === 'interaction' && data?.interaction) {
+      await applyInteraction(data.interaction, sanitizeText(data.user_text || cleaned));
       return;
     }
-    if (isAwaitingRestDecision) {
-      const decision = parseRestDecision(cleaned);
-      const acceptRest = decision === null ? false : decision;
-      const response = await fetch(`${API_BASE}/focus/fatigue-response`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: focusSessionId,
-          accept_rest: acceptRest,
-          user_text: cleaned,
-        }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        if (data?.reply) {
-          setSpeechBubble(data.reply);
-        }
-        if (data?.audio?.base64) {
-          playAudioFromBase64(data.audio.base64, data.audio.format);
-        }
-        if (data?.action === 'end_focus') {
-          handleEndFocus();
-          return;
-        }
-      }
-      setIsAwaitingRestDecision(false);
+    if (data?.focus_state) {
+      applyFocusResponseState(data.focus_state);
+    }
+    const reply = sanitizeText(String(data?.reply ?? ''));
+    if (reply) {
+      setFocusPrompt(reply);
+      setSpeechBubble(reply);
+    }
+    if (data?.audio?.base64) {
+      playAudioFromBase64(data.audio.base64, data.audio.format, 'focus_text_reply', reply);
+    }
+    if (data?.focus_state?.end_focus_after_reply) {
+      handleEndFocus();
     }
   };
 
@@ -1358,6 +2079,11 @@ const App: React.FC = () => {
     setTaskMessages((prev) =>
       prev.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
     );
+  };
+
+  const removeTaskMessage = (id: string) => {
+    setTaskMessages((prev) => prev.filter((entry) => entry.id !== id));
+    setTaskTimeline((prev) => prev.filter((item) => !(item.type === 'message' && item.id === id)));
   };
 
   const showVoiceTranscriptHint = (page: VoiceWsPage, hintText = VOICE_TRANSCRIPT_HINT) => {
@@ -1378,47 +2104,98 @@ const App: React.FC = () => {
     setChatAssistantText(hint);
   };
 
+  const requestGeneratedTasks = async (description: string) => {
+    const response = await fetch(`${API_BASE}/interaction/generate-tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_description: description }),
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      console.warn('[GenerateTasks] request_failed', {
+        status: response.status,
+        detail: detail.slice(0, 200),
+        description: description.replace(/\s+/g, ' ').slice(0, 80),
+      });
+      return null;
+    }
+    return response.json();
+  };
+
+  const startGeneratedTasksPrefetch = (
+    description: string,
+    options: {
+      page: string;
+      requestStart: number;
+      turnId?: string;
+      source: string;
+    },
+  ) => {
+    const cleaned = sanitizeText(description);
+    if (!cleaned) return null;
+    const turnPart = options.turnId ? ` turn_id=${options.turnId}` : '';
+    console.log(
+      `[VoicePerf] page=${options.page}${turnPart} generate_tasks_start_ms=${Math.round(performance.now() - options.requestStart)} source=${options.source}`,
+    );
+    return requestGeneratedTasks(cleaned)
+      .then((data) => {
+        console.log(
+          `[VoicePerf] page=${options.page}${turnPart} generate_tasks_done_ms=${Math.round(performance.now() - options.requestStart)} source=${options.source}`,
+        );
+        return data;
+      })
+      .catch((error) => {
+        console.warn('[GenerateTasks] prefetch_failed', {
+          page: options.page,
+          turnId: options.turnId,
+          source: options.source,
+          error,
+        });
+        return null;
+      });
+  };
+
+  const applyGeneratedTasksResult = async (
+    description: string,
+    data: any,
+    archiveExisting: boolean,
+  ) => {
+    const tasks: string[] = data?.tasks ?? [];
+    if (archiveExisting) {
+      setTaskBoards((prev) => [
+        ...prev,
+        {
+          id: activeBoardId,
+          title: taskTitle,
+          date: taskDate,
+          todoItems: [...todoItems],
+          doneItems: [...doneItems],
+        },
+      ]);
+    }
+    const baseId = Date.now();
+    const newBoardId = `board-${baseId}`;
+    const nextTodoItems = buildTodoSlotsFromTexts(tasks, baseId);
+    taskLastMeaningfulInputRef.current = sanitizeText(description);
+    taskLastBreakdownResultRef.current = getTaskTodoSnapshot(nextTodoItems);
+    taskPendingActionRef.current = null;
+    setTaskTitle(data?.topic || summarizeTopic(description, tasks));
+    todoItemsRef.current = nextTodoItems;
+    setTodoItems(nextTodoItems);
+    setDoneItems([]);
+    setTaskDate(getBeijingDate());
+    setTransitioning({});
+    setActiveBoardId(newBoardId);
+    setTaskTimeline((prev) => [...prev, { type: 'board', id: newBoardId }]);
+  };
+
   const generateTasks = async (description: string, archiveExisting: boolean) => {
     if (!description.trim()) return;
     setIsGeneratingTasks(true);
     try {
-      const response = await fetch(`${API_BASE}/interaction/generate-tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_description: description }),
-      });
-      if (!response.ok) {
-        const detail = await response.text().catch(() => '');
-        console.warn('[GenerateTasks] request_failed', {
-          status: response.status,
-          detail: detail.slice(0, 200),
-          description: description.replace(/\s+/g, ' ').slice(0, 80),
-        });
-        return;
-      }
-      const data = await response.json();
-      const tasks: string[] = data?.tasks ?? [];
-      if (archiveExisting) {
-        setTaskBoards((prev) => [
-          ...prev,
-          {
-            id: activeBoardId,
-            title: taskTitle,
-            date: taskDate,
-            todoItems: [...todoItems],
-            doneItems: [...doneItems],
-          },
-        ]);
-      }
-      const baseId = Date.now();
-      const newBoardId = `board-${baseId}`;
-      setTaskTitle(data?.topic || summarizeTopic(description, tasks));
-      setTodoItems(buildTodoSlotsFromTexts(tasks, baseId));
-      setDoneItems([]);
-      setTaskDate(getBeijingDate());
-      setTransitioning({});
-      setActiveBoardId(newBoardId);
-      setTaskTimeline((prev) => [...prev, { type: 'board', id: newBoardId }]);
+      const data = await requestGeneratedTasks(description);
+      if (!data) return;
+      await applyGeneratedTasksResult(description, data, archiveExisting);
     } finally {
       setIsGeneratingTasks(false);
     }
@@ -1433,6 +2210,7 @@ const App: React.FC = () => {
       onDone?: () => void | Promise<void>;
       onError?: (message?: string) => void;
     },
+    options?: { context?: string },
   ) => {
     const text = (message ?? '').trim();
     if (!text) {
@@ -1465,7 +2243,7 @@ const App: React.FC = () => {
     const response = await fetch(`${API_BASE}/interaction/chat-stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, context: options?.context }),
       signal: controller.signal,
     });
     if (!response.ok || !response.body) {
@@ -1572,7 +2350,7 @@ const App: React.FC = () => {
     }
   };
 
-  const sendChatMessage = async (message: string) => {
+  const sendChatMessage = async (message: string, context?: string) => {
     const cleaned = sanitizeText(message);
     if (!cleaned) return;
     const assistantId = appendTaskMessage('assistant', '');
@@ -1624,13 +2402,17 @@ const App: React.FC = () => {
           updateTaskMessage(assistantId, accumulated);
         }
       },
-    });
+    }, { context });
   };
 
   const applyInteraction = async (
     interaction: any,
     userText?: string,
-    options?: { archiveExisting?: boolean; skipAssistantBubble?: boolean },
+    options?: {
+      archiveExisting?: boolean;
+      skipAssistantBubble?: boolean;
+      prefetchedTaskData?: any;
+    },
   ) => {
     if (!interaction) return;
     const cleanedUserText = userText ? sanitizeText(userText) : '';
@@ -1721,7 +2503,16 @@ const App: React.FC = () => {
         ? options.archiveExisting
         : isInitialTaskLocked;
       if (cleanedUserText) {
-        await generateTasks(cleanedUserText, shouldArchive);
+        if (options?.prefetchedTaskData) {
+          setIsGeneratingTasks(true);
+          try {
+            await applyGeneratedTasksResult(cleanedUserText, options.prefetchedTaskData, shouldArchive);
+          } finally {
+            setIsGeneratingTasks(false);
+          }
+        } else {
+          await generateTasks(cleanedUserText, shouldArchive);
+        }
       }
       if (cleanedUserText) setIsInitialTaskLocked(true);
       setCurrentView('task');
@@ -1766,11 +2557,14 @@ const App: React.FC = () => {
     return interaction;
   };
 
-  const requestIntent = async (text: string) => {
+  const requestIntent = async (
+    text: string,
+    options?: { page?: 'home' | 'task' | 'focus' },
+  ) => {
     const response = await fetch(`${API_BASE}/interaction/intent`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, page: options?.page }),
     });
     if (!response.ok) {
       throw new Error('Intent request failed');
@@ -1913,64 +2707,10 @@ const App: React.FC = () => {
   const handleTaskInputSubmit = async (text: string) => {
     beginThinking();
     try {
-      const cleaned = sanitizeText(text);
-      const shouldArchive = isInitialTaskLocked;
-      appendTaskMessage('user', cleaned);
-      try {
-        const interaction = await requestIntent(cleaned);
-        if (interaction?.type === 'command') {
-          await applyInteraction(interaction, cleaned);
-          return;
-        }
-        if (interaction?.type === 'breakdown') {
-          const renderBreakdownAboveBoard = !isInitialTaskLocked;
-          if (interaction?.audio_text) {
-            const assistantText = sanitizeText(interaction.audio_text);
-            if (renderBreakdownAboveBoard) {
-              setChatUserText(cleaned);
-              setChatAssistantText(assistantText);
-            } else {
-              appendTaskMessage('assistant', assistantText);
-            }
-            if (!isInitialTaskLocked) {
-              setIsInitialTaskLocked(true);
-            }
-            console.log(`[BreakdownLayout] ${renderBreakdownAboveBoard ? 'render_assistant_above_board' : 'render_assistant_below_board'}`, {
-              source: 'task_text_breakdown',
-            });
-              try {
-                const snippet = String(interaction.audio_text ?? '').replace(/\s+/g, ' ').slice(0, 80);
-                const source = 'task_breakdown';
-                  if (isWsAudioActive()) {
-                    console.log('[speak_api] suppressed_during_ws', { source, text: snippet });
-                  } else {
-                    console.log('[speak_api] request', { source, text: snippet });
-                    const speakResponse = await fetch(`${API_BASE}/interaction/speak`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ text: interaction.audio_text, emotion: 'neutral' }),
-                    });
-                    if (speakResponse.ok) {
-                      const payload = await speakResponse.json();
-                      playAudioFromBase64(
-                        payload?.data?.audio?.base64,
-                        payload?.data?.audio?.format,
-                        `speak_api:${source}`,
-                        snippet,
-                      );
-                    }
-                  }
-                } catch {
-                  // ignore speak errors
-                }
-          }
-          await generateTasks(cleaned, shouldArchive);
-          return;
-        }
-      } catch {
-        // ignore intent errors
-      }
-      await sendChatMessage(cleaned);
+      await handleTaskContextualInput(text, {
+        origin: 'text',
+        appendUserMessage: true,
+      });
     } finally {
       endThinking();
     }
@@ -2001,6 +2741,15 @@ const App: React.FC = () => {
       const assistantText = sanitizeText(payload?.data?.assistant?.text || '');
       const interaction = payload?.data?.interaction;
       const shouldArchive = isInitialTaskLocked;
+      const hasTaskFollowupContext = isInitialTaskLockedRef.current && getTaskTodoSnapshot(todoItemsRef.current).length > 0;
+      if (hasTaskFollowupContext && userText) {
+        appendTaskMessage('user', userText);
+        await handleTaskContextualInput(userText, {
+          origin: 'voice',
+          appendUserMessage: false,
+        });
+        return;
+      }
       if (interaction?.type === 'breakdown') {
         const transcriptCheck = assessVoiceTranscript(userText);
         console.log('[VoiceBreakdownGuard] transcript=', {
@@ -2386,11 +3135,16 @@ const App: React.FC = () => {
     let pendingFocusEndAfterReply = false;
     let breakdownStreamStarted = false;
     let pendingBreakdownInteraction: { interaction: any; userText: string } | null = null;
+    let pendingBreakdownTasksPromise: Promise<any | null> | null = null;
+    let pendingBreakdownTasksData: any | null = null;
     const taskWasLockedAtStart = isInitialTaskLocked;
     const shouldRenderTaskFollowupBelowBoard = page === 'task' && taskWasLockedAtStart;
     let taskUserCommitted = false;
+    let pendingTaskVoiceUserMessageId: string | null = null;
+    let pendingTaskVoiceTranscript = '';
     let taskAssistantMessageId: string | null = null;
     let queuedInteractionSpeech: { text: string; source: string } | null = null;
+    let taskFastRouteTakeover = false;
     const watchdogMs = 30000;
     const queueInteractionSpeech = (interaction: any) => {
       const text = sanitizeText(String(interaction?.audio_text ?? ''));
@@ -2408,11 +3162,50 @@ const App: React.FC = () => {
         void speakText(nextSpeech.text, nextSpeech.source, { allowDuringWs: true });
       }, 120);
     };
+    const ensurePendingTaskVoiceUserMessage = (initialText = '正在识别...') => {
+      const canRenderOnTaskPage = page === 'task' && shouldRenderTaskFollowupBelowBoard;
+      if (!canRenderOnTaskPage) return null;
+      if (pendingTaskVoiceUserMessageId) return pendingTaskVoiceUserMessageId;
+      pendingTaskVoiceUserMessageId = appendTaskMessage('user', initialText);
+      pendingTaskVoiceTranscript = sanitizeText(initialText);
+      console.log(`[TaskVoiceUI] create_pending_user_message id=${pendingTaskVoiceUserMessageId}`);
+      return pendingTaskVoiceUserMessageId;
+    };
+    const updatePendingTaskVoiceUserMessage = (text: string, mode: 'partial' | 'final' = 'partial') => {
+      const cleaned = sanitizeText(text);
+      const targetId = ensurePendingTaskVoiceUserMessage(mode === 'partial' ? '正在识别...' : cleaned);
+      if (!targetId || !cleaned || cleaned === pendingTaskVoiceTranscript) return targetId;
+      updateTaskMessage(targetId, cleaned);
+      pendingTaskVoiceTranscript = cleaned;
+      if (mode === 'final') {
+        taskUserCommitted = true;
+        console.log(`[TaskVoiceUI] final_transcript_apply id=${targetId} text=${cleaned.slice(0, 120)}`);
+      } else {
+        console.log(`[TaskVoiceUI] partial_asr_update id=${targetId} text=${cleaned.slice(0, 120)}`);
+      }
+      return targetId;
+    };
+    const cleanupPendingTaskVoiceUserMessage = (reason: string) => {
+      if (!pendingTaskVoiceUserMessageId) return;
+      removeTaskMessage(pendingTaskVoiceUserMessageId);
+      console.log(`[TaskVoiceUI] invalid_transcript_cleanup id=${pendingTaskVoiceUserMessageId} reason=${reason}`);
+      pendingTaskVoiceUserMessageId = null;
+      pendingTaskVoiceTranscript = '';
+      taskUserCommitted = false;
+    };
     const commitTaskUserMessage = (text: string) => {
       const canRenderOnTaskPage = page === 'task' || Boolean(pendingBreakdownInteraction);
       if (!canRenderOnTaskPage || taskUserCommitted) return;
       const cleaned = sanitizeText(text);
       if (!cleaned) return;
+      if (pendingTaskVoiceUserMessageId) {
+        updateTaskMessage(pendingTaskVoiceUserMessageId, cleaned);
+        pendingTaskVoiceTranscript = cleaned;
+        taskUserCommitted = true;
+        console.log(`[TaskVoiceUI] reuse_existing_user_bubble id=${pendingTaskVoiceUserMessageId}`);
+        console.log(`[TaskVoiceUI] final_transcript_apply id=${pendingTaskVoiceUserMessageId} text=${cleaned.slice(0, 120)}`);
+        return;
+      }
       appendTaskMessage('user', cleaned);
       taskUserCommitted = true;
     };
@@ -2456,6 +3249,30 @@ const App: React.FC = () => {
       pendingFocusEndAfterReply = false;
       handleEndFocus();
     };
+    if (useUi && page === 'task' && shouldRenderTaskFollowupBelowBoard) {
+      ensurePendingTaskVoiceUserMessage();
+    }
+    const startBreakdownTasksPrefetch = (description: string) => {
+      const cleaned = sanitizeText(description);
+      if (!cleaned || !['home', 'task'].includes(page) || pendingBreakdownTasksPromise) return;
+      console.log('[VoicePerf] page=' + page + ' turn_id=' + turnId + ' generate_tasks_start_ms=' + Math.round(performance.now() - requestStart));
+      pendingBreakdownTasksPromise = requestGeneratedTasks(cleaned)
+        .then((data) => {
+          pendingBreakdownTasksData = data;
+          console.log('[VoicePerf] page=' + page + ' turn_id=' + turnId + ' generate_tasks_done_ms=' + Math.round(performance.now() - requestStart));
+          console.log(`[TodoParallel] generate_tasks_done turn_id=${turnId}`);
+          return data;
+        })
+        .catch((error) => {
+          console.warn('[VoiceBreakdownStream] generate_tasks_prefetch_failed', {
+            page,
+            turnId,
+            error,
+          });
+          pendingBreakdownTasksData = null;
+          return null;
+        });
+    };
     const applyPendingBreakdownResult = async (reason: string) => {
       if (!pendingBreakdownInteraction) return false;
       const nextBreakdown = pendingBreakdownInteraction;
@@ -2469,6 +3286,7 @@ const App: React.FC = () => {
       if (!transcriptCheck.usable) {
         pendingBreakdownInteraction = null;
         interactionHandled = true;
+        cleanupPendingTaskVoiceUserMessage('invalid_transcript');
         console.warn('[VoiceTranscript] final_invalid_skip_breakdown', {
           page,
           turnId,
@@ -2494,6 +3312,9 @@ const App: React.FC = () => {
       });
       pendingBreakdownInteraction = null;
       interactionHandled = true;
+      const prefetchedTaskData = pendingBreakdownTasksData || await pendingBreakdownTasksPromise;
+      pendingBreakdownTasksPromise = null;
+      pendingBreakdownTasksData = null;
       const streamedText = sanitizeText(assistantBuffer);
       const finalizedAssistantText = sanitizeText(
         streamedText || String(nextBreakdown.interaction?.audio_text ?? ''),
@@ -2526,9 +3347,15 @@ const App: React.FC = () => {
             ? {
               archiveExisting: taskWasLockedAtStart,
               skipAssistantBubble: Boolean(taskAssistantMessageId),
+              prefetchedTaskData,
             }
-            : { skipAssistantBubble: Boolean(taskAssistantMessageId) },
+            : { skipAssistantBubble: Boolean(taskAssistantMessageId), prefetchedTaskData },
         );
+        console.log(`[TodoParallel] todo_applied turn_id=${turnId}`);
+        if (isVoiceTurnPlaybackProtected(runId)) {
+          console.log(`[TodoParallel] todo_applied_without_interrupt turn_id=${turnId}`);
+          console.log(`[TodoParallel] skip_audio_reset turn_id=${turnId}`);
+        }
         console.log('[VoiceBreakdownStream] todo_updated', { page, turnId });
         console.log('[BreakdownDedup] todo_updated', { page, turnId });
         console.log('[VoiceBreakdownStream] page_switched_to_task', { from: page, turnId });
@@ -2620,6 +3447,8 @@ const App: React.FC = () => {
     wsAudioStateRef.current.ttsDone = false;
     wsAudioStateRef.current.pendingAudio = 0;
     wsAudioStateRef.current.endAudioSent = false;
+    wsAudioStateRef.current.playbackInProgress = false;
+    wsAudioStateRef.current.transportClosed = false;
     clearWatchdog();
     if (wsAudioStateRef.current.socket) {
       console.log('[ws-audio] ws_close_called', {
@@ -2651,6 +3480,7 @@ const App: React.FC = () => {
     wsAudioStateRef.current.socket = socket;
     const turnId = `turn-audio-${Date.now()}`;
     wsAudioStateRef.current.turnId = turnId;
+    console.log(`[VoiceTurn] start turn_id=${turnId} page=${page}`);
     let firstChunkLogged = false;
     let totalChunks = 0;
     let pendingSends = 0;
@@ -2692,6 +3522,7 @@ const App: React.FC = () => {
       wsAudioStateRef.current.endAudioSent = true;
       socket.send(JSON.stringify({ type: 'end_audio', turn_id: turnId }));
       console.log('[ws-audio] end_audio_sent', { turnId, reason });
+      console.log(`[VoicePerf] page=${page} turn_id=${turnId} recording_end_ms=${Math.round(performance.now() - requestStart)} reason=${reason}`);
       triggerWatchdog('await_done');
     };
 
@@ -2758,10 +3589,7 @@ const App: React.FC = () => {
         mode: 'audio',
         page,
         context: page === 'focus'
-          ? {
-            focus_session_id: focusSessionIdRef.current,
-            remaining_seconds: remainingSecondsRef.current,
-          }
+          ? buildFocusWsContext()
           : undefined,
       }));
 
@@ -3105,9 +3933,34 @@ const App: React.FC = () => {
         reason: closeReason,
         hadFirstAudioChunk: firstAudioChunkReceivedLogged,
       });
-      console.log('[ws-audio] turn_cleanup', { turnId, reason: closeReason });
+      const currentAudio = wsAudioStateRef.current.audio;
+      const isCurrentWsAudio = Boolean(
+        currentAudio
+        && currentAudio.dataset.source === 'ws_audio'
+        && currentAudio.dataset.wsRunId === String(runId),
+      );
+      const playbackShouldSurviveClose = Boolean(
+        audioQueue.size > 0
+        || currentPlayingSeq !== null
+        || (
+          isCurrentWsAudio
+          && currentAudio
+          && Boolean(currentAudio.src)
+          && (!currentAudio.paused || currentAudio.currentTime > 0)
+        ),
+      );
+      console.log('[ws-audio] turn_cleanup', {
+        turnId,
+        reason: closeReason,
+        playbackShouldSurviveClose,
+        pendingAudio: audioQueue.size,
+        currentPlayingSeq,
+      });
+      if (pendingTaskVoiceUserMessageId && !taskUserCommitted && !finalTranscript) {
+        cleanupPendingTaskVoiceUserMessage(closeReason);
+      }
       clearWatchdog();
-      if (audioQueue.size > 0) {
+      if (audioQueue.size > 0 && !playbackShouldSurviveClose) {
         audioQueue.clear();
         updateAudioQueueState();
         console.log('[ws-audio] audio_queue_cleared', { reason: 'socket_close' });
@@ -3132,35 +3985,40 @@ const App: React.FC = () => {
         wsAudioStateRef.current.pcmSource = null;
         wsAudioStateRef.current.pcmContext = null;
       }
-      if (wsAudioStateRef.current.audio) {
-        const currentAudio = wsAudioStateRef.current.audio;
-        const isCurrentWsAudio =
-          currentAudio.dataset.source === 'ws_audio'
-          && currentAudio.dataset.wsRunId === String(runId);
-        if (isCurrentWsAudio) {
-          currentAudio.pause();
-          currentAudio.currentTime = 0;
-          currentAudio.src = '';
-          currentAudio.dataset.source = 'other';
-          currentAudio.dataset.wsRunId = '';
-        }
+      if (currentAudio && isCurrentWsAudio && !playbackShouldSurviveClose) {
+        console.warn(`[VoiceTurn] playback_interrupted turn_id=${turnId} reason=${closeReason}`);
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+        currentAudio.src = '';
+        currentAudio.dataset.source = 'other';
+        currentAudio.dataset.wsRunId = '';
       }
       wsAudioStateRef.current.recorder = null;
       wsAudioStateRef.current.stream = null;
       wsAudioStateRef.current.pcmActive = false;
       wsAudioStateRef.current.socket = null;
-      wsAudioStateRef.current.turnId = null;
-      wsAudioStateRef.current.page = null;
-      wsAudioStateRef.current.audio = null;
       wsAudioStateRef.current.stopRequested = false;
-      wsAudioStateRef.current.useUi = false;
       wsAudioStateRef.current.watchdogTimer = null;
-      wsAudioStateRef.current.turnActive = false;
-      wsAudioStateRef.current.ttsDone = false;
-      wsAudioStateRef.current.pendingAudio = 0;
       wsAudioStateRef.current.endAudioSent = false;
+      wsAudioStateRef.current.transportClosed = true;
+      if (!playbackShouldSurviveClose) {
+        wsAudioStateRef.current.turnId = null;
+        wsAudioStateRef.current.page = null;
+        wsAudioStateRef.current.audio = null;
+        wsAudioStateRef.current.useUi = false;
+        wsAudioStateRef.current.turnActive = false;
+        wsAudioStateRef.current.ttsDone = false;
+        wsAudioStateRef.current.pendingAudio = 0;
+        wsAudioStateRef.current.playbackInProgress = false;
+        console.log(`[VoiceTurn] cleanup turn_id=${turnId} reason=${closeReason}`);
+      } else {
+        console.log(`[TodoParallel] skip_audio_reset turn_id=${turnId}`);
+        console.log(`[VoiceTurn] cleanup turn_id=${turnId} reason=defer_until_playback_complete`);
+      }
       setIsRecording(false);
-      setAvatarSpeechState('idle');
+      if (!playbackShouldSurviveClose) {
+        setAvatarSpeechState('idle');
+      }
       endThinkingOnce();
     });
 
@@ -3178,6 +4036,7 @@ const App: React.FC = () => {
         if (!firstPartialLogged) {
           firstPartialLogged = true;
           console.log('[ws-audio] first_partial_asr_ms', Math.round(performance.now() - requestStart));
+          console.log(`[VoicePerf] page=${page} turn_id=${turnId} first_partial_asr_ms=${Math.round(performance.now() - requestStart)}`);
         }
         console.log('[ws-audio] partial_asr', payload.text);
         const asrText = String(payload?.text ?? '').trim();
@@ -3192,6 +4051,7 @@ const App: React.FC = () => {
         }
         if (isFinal) {
           console.log('[ws-audio] final_asr_ms', Math.round(performance.now() - requestStart));
+          console.log(`[VoicePerf] page=${page} turn_id=${turnId} asr_final_ms=${Math.round(performance.now() - requestStart)}`);
         }
         if (useUi) {
           if (isFinal) {
@@ -3199,12 +4059,18 @@ const App: React.FC = () => {
               ? asrText
               : (latestUsablePartialAsr || latestNonemptyPartialAsr || lastStableAsrText);
             if (nextFinalText) {
+              if (page === 'task' && shouldRenderTaskFollowupBelowBoard) {
+                updatePendingTaskVoiceUserMessage(nextFinalText, 'final');
+              }
               if (!shouldRenderTaskFollowupBelowBoard) {
                 setChatUserText(nextFinalText);
               }
               lastStableAsrText = nextFinalText;
             }
           } else if (asrText && !noisyPartial) {
+            if (page === 'task' && shouldRenderTaskFollowupBelowBoard) {
+              updatePendingTaskVoiceUserMessage(asrText, 'partial');
+            }
             if (!shouldRenderTaskFollowupBelowBoard) {
               setChatUserText(asrText);
             }
@@ -3235,6 +4101,27 @@ const App: React.FC = () => {
             turnId,
             text: effectiveText.replace(/\s+/g, ' ').slice(0, 80),
           });
+          if (page === 'task' && shouldRenderTaskFollowupBelowBoard && !taskFastRouteTakeover) {
+            taskFastRouteTakeover = true;
+            interactionHandled = true;
+            console.log('[TaskFastRoute] voice_followup_takeover=true');
+            if (socket.readyState === WebSocket.OPEN) {
+              closeWsAudio('task_fast_route_takeover');
+            }
+            beginThinking();
+            try {
+              await handleTaskContextualInput(effectiveText, {
+                origin: 'voice',
+                appendUserMessage: false,
+                allowDuringWs: true,
+              });
+            } catch (error) {
+              console.warn(`${logTag} task_fast_route_failed`, error);
+            } finally {
+              endThinking();
+            }
+            return;
+          }
         }
       }
       if (payload?.type === 'focus_state') {
@@ -3242,6 +4129,10 @@ const App: React.FC = () => {
         return;
       }
       if (payload?.type === 'interaction') {
+        if (taskFastRouteTakeover) {
+          console.log('[TaskFastRoute] ignore_server_interaction_after_takeover', { turnId, page });
+          return;
+        }
         const interaction = payload?.interaction;
         const userText = sanitizeText(String(payload?.user_text ?? finalTranscript ?? ''));
         console.log(`${logTag} interaction_received`, {
@@ -3260,6 +4151,7 @@ const App: React.FC = () => {
         }
         if (interaction?.type === 'breakdown' && payload?.defer_apply) {
           pendingBreakdownInteraction = { interaction, userText };
+          startBreakdownTasksPrefetch(userText);
           breakdownStreamStarted = false;
           const renderBreakdownAboveBoard = !shouldRenderTaskFollowupBelowBoard;
           console.log('[BreakdownDedup] structured_breakdown_received', {
@@ -3318,6 +4210,7 @@ const App: React.FC = () => {
         if (!firstPartialTextLogged) {
           firstPartialTextLogged = true;
           console.log('[ws-audio] first_partial_text_ms', Math.round(performance.now() - requestStart));
+          console.log(`[VoicePerf] page=${page} turn_id=${turnId} first_partial_text_ms=${Math.round(performance.now() - requestStart)}`);
         }
         const fragment = String(payload.text ?? '');
         const isBreakdownStream = payload?.source === 'breakdown_stream';
@@ -3407,6 +4300,7 @@ const App: React.FC = () => {
           text: payload.text,
         });
         updateAudioQueueState();
+        console.log(`[VoiceTurn] audio_chunk_enqueued turn_id=${turnId} seq=${seq}`);
         console.log('[ws-audio] audio_chunk_enqueued', { seq, queueLength: audioQueue.size });
 
         const playNext = async () => {
@@ -3439,18 +4333,22 @@ const App: React.FC = () => {
             audioPlayer.dataset.wsRunId = String(runId);
             audioPlayer.src = `data:${mime};base64,${next.audio}`;
             audioPlayer.currentTime = 0;
+            wsAudioStateRef.current.playbackInProgress = true;
             setAvatarSpeechState('speaking');
             const playSeq = expectedSeq - 1;
             currentPlayingSeq = playSeq;
             if (!firstAudioPlayLogged) {
               firstAudioPlayLogged = true;
               console.log('[ws-audio] first_audio_play_start_ms', Math.round(performance.now() - requestStart));
+              console.log(`[VoicePerf] page=${page} turn_id=${turnId} first_audio_chunk_played_ms=${Math.round(performance.now() - requestStart)}`);
             }
             try {
               console.log('[audio] play', { source: 'ws_audio', seq: playSeq, text: next.text });
               await audioPlayer.play();
+              console.log(`[VoiceTurn] playback_started turn_id=${turnId}`);
               console.log('[ws-audio] audio_playback_started', { seq: playSeq });
           } catch (error) {
+            console.warn(`[VoiceTurn] playback_interrupted turn_id=${turnId} reason=play_error`);
             console.warn('[ws-audio] playback_error', error);
             console.warn('[ws-audio] audio_playback_error', { seq: playSeq, error });
             console.warn('[ws-audio] audio_play_error', error);
@@ -3470,13 +4368,39 @@ const App: React.FC = () => {
             if (audioQueue.size === 0 && doneLogged && !finalAudioPlayLogged) {
               finalAudioPlayLogged = true;
               console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
+          console.log(`[VoicePerf] page=${page} turn_id=${turnId} total_turn_ms=${Math.round(performance.now() - requestStart)}`);
             }
             if (audioQueue.size === 0 && !doneLogged) {
-              setAvatarSpeechState('speaking_hold');
+              if (wsAudioStateRef.current.transportClosed) {
+                setAvatarSpeechState('idle');
+                wsAudioStateRef.current.turnActive = false;
+                wsAudioStateRef.current.pendingAudio = 0;
+                wsAudioStateRef.current.playbackInProgress = false;
+                wsAudioStateRef.current.turnId = null;
+                wsAudioStateRef.current.page = null;
+                wsAudioStateRef.current.audio = null;
+                wsAudioStateRef.current.useUi = false;
+                wsAudioStateRef.current.ttsDone = false;
+                wsAudioStateRef.current.endAudioSent = false;
+                wsAudioStateRef.current.transportClosed = false;
+                console.log(`[VoiceTurn] cleanup turn_id=${turnId} reason=transport_closed_after_playback`);
+                maybeFinishFocusAfterReply();
+              } else {
+                setAvatarSpeechState('speaking_hold');
+              }
             } else if (audioQueue.size === 0 && doneLogged) {
               setAvatarSpeechState('idle');
               wsAudioStateRef.current.turnActive = false;
               wsAudioStateRef.current.pendingAudio = 0;
+              wsAudioStateRef.current.playbackInProgress = false;
+              wsAudioStateRef.current.turnId = null;
+              wsAudioStateRef.current.page = null;
+              wsAudioStateRef.current.audio = null;
+              wsAudioStateRef.current.useUi = false;
+              wsAudioStateRef.current.ttsDone = false;
+              wsAudioStateRef.current.endAudioSent = false;
+              wsAudioStateRef.current.transportClosed = false;
+              console.log(`[VoiceTurn] cleanup turn_id=${turnId} reason=playback_completed`);
               maybeFinishFocusAfterReply();
             }
             currentPlayingSeq = null;
@@ -3528,7 +4452,7 @@ const App: React.FC = () => {
           }
         }
         if (payload?.reason === 'breakdown_stream') {
-          await applyPendingBreakdownResult('done');
+          void applyPendingBreakdownResult('done');
         }
         if (audioQueue.size > 0) {
           const pendingSeqs = Array.from(audioQueue.keys()).sort((a, b) => a - b);
@@ -3537,9 +4461,19 @@ const App: React.FC = () => {
         if (audioQueue.size === 0 && audioPlayer.paused && !finalAudioPlayLogged) {
           finalAudioPlayLogged = true;
           console.log('[ws-audio] final_audio_play_end_ms', Math.round(performance.now() - requestStart));
+          console.log(`[VoicePerf] page=${page} turn_id=${turnId} total_turn_ms=${Math.round(performance.now() - requestStart)}`);
           setAvatarSpeechState('idle');
           wsAudioStateRef.current.turnActive = false;
           wsAudioStateRef.current.pendingAudio = 0;
+          wsAudioStateRef.current.playbackInProgress = false;
+          wsAudioStateRef.current.turnId = null;
+          wsAudioStateRef.current.page = null;
+          wsAudioStateRef.current.audio = null;
+          wsAudioStateRef.current.useUi = false;
+          wsAudioStateRef.current.ttsDone = false;
+          wsAudioStateRef.current.endAudioSent = false;
+          wsAudioStateRef.current.transportClosed = false;
+          console.log(`[VoiceTurn] cleanup turn_id=${turnId} reason=done_without_pending_audio`);
           if (page === 'focus' && assistantBuffer) {
             setFocusPrompt(assistantBuffer);
           }
@@ -3583,6 +4517,7 @@ const App: React.FC = () => {
           });
         }
         if (useUi && (payload?.message === 'empty_asr_text' || payload?.message === 'invalid_voice_transcript')) {
+          cleanupPendingTaskVoiceUserMessage(payload?.message || 'invalid_voice_transcript');
           showVoiceTranscriptHint(page);
         }
         if (pendingBreakdownInteraction) {
@@ -3659,6 +4594,7 @@ const App: React.FC = () => {
         turn_id: turnId,
       }));
       console.log('[ws-audio] end_audio_sent', { turnId, reason });
+      console.log(`[VoicePerf] page=${page} turn_id=${turnId} recording_end_ms=${Math.round(performance.now() - requestStart)} reason=${reason}`);
     };
     if (wsAudioStateRef.current.recorder && wsAudioStateRef.current.recorder.state !== 'inactive') {
       wsAudioStateRef.current.stopRequested = true;
@@ -3986,10 +4922,19 @@ const App: React.FC = () => {
       ),
     );
     if (hasActiveVoiceWs && activeVoicePage !== currentView) {
-      console.log(`[VoiceWS][${activeVoicePage}] stop_on_view_change`, {
-        nextView: currentView,
-      });
-      stopWsAudioRecording();
+      if (isVoiceTurnPlaybackProtected()) {
+        console.log(`[TodoParallel] skip_audio_reset turn_id=${wsAudioStateRef.current.turnId}`);
+        console.log(`[VoiceWS][${activeVoicePage}] keep_alive_on_view_change`, {
+          turnId: wsAudioStateRef.current.turnId,
+          nextView: currentView,
+        });
+      } else {
+        console.log(`[VoiceWS][${activeVoicePage}] stop_on_view_change`, {
+          nextView: currentView,
+        });
+        console.warn(`[VoiceTurn] playback_interrupted turn_id=${wsAudioStateRef.current.turnId} reason=view_change`);
+        stopWsAudioRecording();
+      }
     }
     if (currentView !== 'break') {
       setBreakStretchQueued(false);
@@ -4007,10 +4952,12 @@ const App: React.FC = () => {
       if (breakPhaseRef.current !== 'rest_idle') {
         setBreakPhase('rest_idle');
       }
-      if (audioPlayerRef.current && !audioPlayerRef.current.paused) {
-        audioPlayerRef.current.pause();
-        audioPlayerRef.current.currentTime = 0;
-        audioPlayerRef.current.src = '';
+      const currentAudio = audioPlayerRef.current;
+      const isBreakAudio = Boolean(currentAudio?.dataset.source?.startsWith('break'));
+      if (currentAudio && !currentAudio.paused && isBreakAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+        currentAudio.src = '';
       }
       return;
     }

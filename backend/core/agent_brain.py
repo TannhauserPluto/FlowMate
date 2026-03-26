@@ -10,6 +10,7 @@ import httpx
 from config import settings
 from .prompt_templates import PromptTemplates
 from demo_task_breakdown import get_demo_task_breakdown
+from services.fast_route_utils import check_greeting_utterance
 
 
 TASK_TEXT_FILLER_RE = re.compile(r"^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧)+$")
@@ -270,11 +271,12 @@ class AgentBrain:
     async def chat(self, message: str, context: Optional[str] = None) -> str:
         if self.use_preset:
             message_lower = message.lower()
+            greeting_match = check_greeting_utterance(message)
             if "?" in message_lower or "？" in message_lower:
                 return "你是遇到什么问题了吗？"
             if "怎么" in message_lower or "不会" in message_lower or "报错" in message_lower:
                 return "你是遇到什么问题了吗？"
-            if "你好" in message_lower or "hi" in message_lower:
+            if greeting_match.get("matched") == "true":
                 return "你好呀，需要帮忙吗？"
             if "help" in message_lower or "帮帮我" in message_lower:
                 return "我在这里，随时可以帮你。"

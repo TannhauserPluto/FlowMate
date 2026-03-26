@@ -31,6 +31,10 @@ except Exception:
 VOICE_PARTIAL_FILLER_RE = re.compile(r"^(?:啊|嗯|哦|噢|诶|欸|唉|哎|哈|喂|呃|额|呢|啦|呀|嘛|吧|好的|好啊|好呀|好呢|嗯嗯|啊啊|哦哦|诶诶|欸欸|哎呀)+$")
 
 
+_STREAM_REGION_ENDPOINT_CACHE: Optional[Tuple[str, str, str]] = None
+_STREAM_REGION_ENDPOINT_CACHE_LOCK = threading.Lock()
+
+
 def _is_usable_partial_text(text: Optional[str]) -> bool:
     cleaned = " ".join(str(text or "").split()).strip()
     if not cleaned:
@@ -62,39 +66,66 @@ def _infer_extension(mime_type: Optional[str]) -> str:
     return "webm"
 
 
-def _resolve_stream_region_or_endpoint() -> Tuple[str, str]:
-    explicit = (settings.ASR_STREAM_REGION or "").strip().lower()
-    if explicit in ("cn", "china", "mainland"):
-        return "cn", f"explicit:{explicit}"
-    if explicit in ("intl", "international", "overseas", "sg", "singapore"):
-        return "intl", f"explicit:{explicit}"
+def _resolve_stream_region_or_endpoint() -> Tuple[str, str, str]:
+    global _STREAM_REGION_ENDPOINT_CACHE
+    with _STREAM_REGION_ENDPOINT_CACHE_LOCK:
+        if _STREAM_REGION_ENDPOINT_CACHE is not None:
+            return _STREAM_REGION_ENDPOINT_CACHE
+
+    explicit_endpoint = (
+        (settings.ASR_STREAM_ENDPOINT or "").strip()
+        or (os.getenv("DASHSCOPE_ENDPOINT") or "").strip()
+        or (os.getenv("DASHSCOPE_API_BASE") or "").strip()
+        or str(getattr(dashscope, "api_base", "") or "").strip()
+        or str(getattr(dashscope, "base_url", "") or "").strip()
+        or str(getattr(dashscope, "endpoint", "") or "").strip()
+    )
+
+    def infer_region(candidate: str) -> Optional[str]:
+        lower = (candidate or "").strip().lower()
+        if lower in ("cn", "china", "mainland"):
+            return "cn"
+        if lower in ("intl", "international", "overseas", "sg", "singapore"):
+            return "intl"
+        if any(token in lower for token in ("intl", "international", "overseas", "ap-southeast", "singapore", "sg")):
+            return "intl"
+        if any(token in lower for token in ("aliyuncs.com", "cn-", "china", "hangzhou")):
+            return "cn"
+        return None
+    
+    if explicit_endpoint:
+        inferred = infer_region(explicit_endpoint) or (settings.ASR_STREAM_DEFAULT_REGION or "intl").strip().lower() or "intl"
+        resolved = (inferred, explicit_endpoint, "endpoint")
+        with _STREAM_REGION_ENDPOINT_CACHE_LOCK:
+            _STREAM_REGION_ENDPOINT_CACHE = resolved
+        return resolved
+
+    explicit_region = (settings.ASR_STREAM_REGION or "").strip().lower()
+    if explicit_region and explicit_region != "auto":
+        inferred = infer_region(explicit_region)
+        if inferred:
+            resolved = (inferred, f"sdk_default:{inferred}", "config")
+            with _STREAM_REGION_ENDPOINT_CACHE_LOCK:
+                _STREAM_REGION_ENDPOINT_CACHE = resolved
+            return resolved
 
     env_region = (
         os.getenv("DASHSCOPE_REGION")
         or os.getenv("DASHSCOPE_API_REGION")
         or ""
     ).strip().lower()
-    if env_region in ("cn", "china", "mainland"):
-        return "cn", f"env:{env_region}"
-    if env_region in ("intl", "international", "overseas", "sg", "singapore"):
-        return "intl", f"env:{env_region}"
+    inferred_env = infer_region(env_region)
+    if inferred_env:
+        resolved = (inferred_env, f"sdk_default:{inferred_env}", "env")
+        with _STREAM_REGION_ENDPOINT_CACHE_LOCK:
+            _STREAM_REGION_ENDPOINT_CACHE = resolved
+        return resolved
 
-    endpoint = (
-        os.getenv("DASHSCOPE_ENDPOINT")
-        or os.getenv("DASHSCOPE_API_BASE")
-        or getattr(dashscope, "api_base", None)
-        or getattr(dashscope, "base_url", None)
-        or getattr(dashscope, "endpoint", None)
-    )
-    if endpoint:
-        endpoint_str = str(endpoint)
-        lower = endpoint_str.lower()
-        if any(token in lower for token in ("intl", "international", "overseas", "ap-southeast", "singapore", "sg")):
-            return "intl", endpoint_str
-        if any(token in lower for token in ("aliyuncs.com", "cn-", "china", "hangzhou")):
-            return "cn", endpoint_str
-        return "unknown", endpoint_str
-    return "unknown", "unknown"
+    default_region = infer_region(settings.ASR_STREAM_DEFAULT_REGION) or "intl"
+    resolved = (default_region, f"sdk_default:{default_region}", "default")
+    with _STREAM_REGION_ENDPOINT_CACHE_LOCK:
+        _STREAM_REGION_ENDPOINT_CACHE = resolved
+    return resolved
 
 
 def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -360,25 +391,11 @@ class StreamingAsrSession:
             f"turn_id={self.turn_id} mime={self.mime_type} format={stream_format} "
             f"sample_rate={stream_sample_rate} transcode=none"
         )
-        region, endpoint = _resolve_stream_region_or_endpoint()
-        print(
-            "[ws] asr_stream_region_or_endpoint="
-            f"{endpoint} turn_id={self.turn_id}"
-        )
-        if region == "unknown":
-            print(
-                "[ws] asr_stream_region_warning "
-                f"turn_id={self.turn_id} hint=SET_ASR_STREAM_REGION"
-            )
-        region_hint = (settings.ASR_STREAM_REGION or "").strip().lower()
+        region, endpoint, source = _resolve_stream_region_or_endpoint()
+        print(f"[ASRConfig] resolved_region={region} source={source} turn_id={self.turn_id}")
+        print(f"[ASRConfig] resolved_endpoint={endpoint} turn_id={self.turn_id}")
         if region == "intl":
             stream_model = settings.ASR_STREAM_MODEL_INTL
-        elif region == "unknown" and region_hint in ("", "auto") and settings.ASR_STREAM_MODEL_INTL:
-            stream_model = settings.ASR_STREAM_MODEL_INTL
-            print(
-                "[ws] asr_stream_region_fallback=intl "
-                f"turn_id={self.turn_id} reason=region_unknown"
-            )
         else:
             stream_model = settings.ASR_STREAM_MODEL
         print(
@@ -391,6 +408,7 @@ class StreamingAsrSession:
             sample_rate=stream_sample_rate,
             audio_format=stream_format,
             on_result=self._on_stream_result,
+            endpoint=None if endpoint.startswith("sdk_default:") else endpoint,
         )
         if not self.stream_backend.active:
             print(
@@ -588,12 +606,14 @@ class DashscopeStreamingBackend:
         sample_rate: int,
         audio_format: str,
         on_result,
+        endpoint: Optional[str] = None,
     ) -> None:
         self.turn_id = turn_id
         self.model = model
         self.sample_rate = sample_rate
         self.audio_format = audio_format
         self.on_result = on_result
+        self.endpoint = endpoint
         self.active = False
         self.last_error: Optional[str] = None
         self._recognition = None
@@ -618,6 +638,11 @@ class DashscopeStreamingBackend:
         try:
             if dashscope:
                 dashscope.api_key = settings.DASHSCOPE_API_KEY
+                if self.endpoint:
+                    try:
+                        dashscope.api_base = self.endpoint
+                    except Exception:
+                        pass
             if Recognition is None:
                 raise RuntimeError("Recognition unavailable")
             self._callback = DashscopeStreamingBackend.Callback(self)
